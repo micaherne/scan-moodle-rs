@@ -1,0 +1,14 @@
+[package]
+name = "scan-moodle"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rayon = "1"
+walkdir = "2"
+mago-syntax = "1.43.0"
+mago-database = "1.43.0"
+mago-allocator = "1.43.0"
+
+[profile.release]
+lto = true
