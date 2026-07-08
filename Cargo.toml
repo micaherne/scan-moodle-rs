@@ -9,6 +9,10 @@ walkdir = "2"
 mago-syntax = "1.43.0"
 mago-database = "1.43.0"
 mago-allocator = "1.43.0"
+mago-span = "1.43.0"
+
+[dev-dependencies]
+csv = "1"
 
 [profile.release]
 lto = true
