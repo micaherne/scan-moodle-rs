@@ -4,6 +4,7 @@ use std::path::Path;
 
 pub mod components;
 pub mod resolver;
+pub mod thirdparty;
 
 /// The path from the repository root to $CFG->dirroot, with a trailing slash (e.g. 'public/'),
 /// or '' if the two coincide.

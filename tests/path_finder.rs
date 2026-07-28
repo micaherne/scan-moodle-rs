@@ -1,5 +1,6 @@
 //! Ported from moodle-splittable's `tests/Parser/PathFindingVisitorTest.php`.
 
+use scan_moodle::path_finder::PathKind;
 use scan_moodle::path_finder::PathNotation;
 use scan_moodle::path_finder::find_paths;
 
@@ -162,4 +163,120 @@ fn mono_path_expr() {
         assert_eq!(paths.len(), 1, "expected exactly one path for {code:?}");
         assert_eq!(paths[0].mono_path_expr, *expected, "code={code}");
     }
+}
+
+/// Each of the existing anchors is classified with its own [`PathKind`].
+#[test]
+fn existing_kinds_are_classified_correctly() {
+    let notation = PathNotation::new("public/");
+    let cases: &[(&str, PathKind)] = &[
+        ("$CFG->dirroot . '/lib/setup.php'", PathKind::Dirroot),
+        ("$CFG->libdir . '/clilib.php'", PathKind::Libdir),
+        ("$CFG->libdir", PathKind::Libdir),
+        ("__DIR__ . '/locallib.php'", PathKind::Dir),
+        ("__FILE__ . '.bak'", PathKind::File),
+        ("dirname(__FILE__) . '/locallib.php'", PathKind::Dir),
+    ];
+    for (code, expected_kind) in cases {
+        let source = format!("<?php {code};");
+        let paths = find_paths(&source, "public/lib/moodlelib.php", &notation);
+        assert_eq!(paths.len(), 1, "expected exactly one path for {code:?}");
+        assert_eq!(paths[0].kind, *expected_kind, "code={code}");
+    }
+}
+
+/// $CFG->root behaves exactly like $CFG->dirroot/libdir: bare or as the leading concat operand.
+#[test]
+fn cfg_root_is_recognised() {
+    let notation = PathNotation::new("public/");
+
+    let paths = find_paths("<?php $CFG->root;", "public/lib/moodlelib.php", &notation);
+    assert_eq!(paths.len(), 1);
+    assert_eq!(paths[0].path, "#");
+    assert_eq!(paths[0].kind, PathKind::Root);
+
+    let paths = find_paths("<?php $CFG->root . '/README.md';", "public/lib/moodlelib.php", &notation);
+    assert_eq!(paths.len(), 1);
+    assert_eq!(paths[0].path, "#/README.md");
+    assert_eq!(paths[0].real_path, "README.md");
+    assert_eq!(paths[0].kind, PathKind::Root);
+}
+
+/// A bare string literal that is the *sole* value of a require/include construct is treated as
+/// definitely a path, resolved relative to the current file's directory.
+#[test]
+fn require_bare_literal_resolves_relative_to_current_file() {
+    let notation = PathNotation::new("public/");
+    let paths = find_paths("<?php require('locallib.php');", "public/mod/forum/lib.php", &notation);
+    assert_eq!(paths.len(), 1);
+    assert_eq!(paths[0].kind, PathKind::RequireLiteral);
+    assert_eq!(paths[0].real_path, "public/mod/forum/locallib.php");
+    assert_eq!(paths[0].parent, Some("require".to_string()));
+}
+
+/// A require/include's bare literal wins over the (weaker) dots-literal classification, even
+/// when the literal also starts with '../'.
+#[test]
+fn require_bare_dots_literal_is_classified_as_require_literal() {
+    let notation = PathNotation::new("public/");
+    let paths = find_paths("<?php require_once('../config.php');", "public/mod/forum/lib.php", &notation);
+    assert_eq!(paths.len(), 1);
+    assert_eq!(paths[0].kind, PathKind::RequireLiteral);
+    assert_eq!(paths[0].real_path, "public/mod/config.php");
+    assert_eq!(paths[0].parent, Some("require_once".to_string()));
+}
+
+/// include/include_once are recognised the same way as require/require_once.
+#[test]
+fn include_bare_literal_resolves_relative_to_current_file() {
+    let notation = PathNotation::new("public/");
+    let paths = find_paths("<?php include('settings.php');", "public/admin/index.php", &notation);
+    assert_eq!(paths.len(), 1);
+    assert_eq!(paths[0].kind, PathKind::RequireLiteral);
+    assert_eq!(paths[0].real_path, "public/admin/settings.php");
+    assert_eq!(paths[0].parent, Some("include".to_string()));
+
+    let paths = find_paths("<?php include_once('settings.php');", "public/admin/index.php", &notation);
+    assert_eq!(paths.len(), 1);
+    assert_eq!(paths[0].parent, Some("include_once".to_string()));
+}
+
+/// require of a concatenation is not a "bare" literal, so it falls back to ordinary detection —
+/// which, with no recognised anchor, finds nothing.
+#[test]
+fn require_of_a_concat_is_not_a_bare_literal() {
+    let notation = PathNotation::new("public/");
+    let paths = find_paths("<?php require($x . 'lib.php');", "public/mod/forum/lib.php", &notation);
+    assert_eq!(paths.len(), 0);
+}
+
+/// Outside a require/include, a string literal starting with '../' is still recorded, but only
+/// with the much more speculative dots-literal kind.
+#[test]
+fn bare_dots_literal_outside_require_is_speculative() {
+    let notation = PathNotation::new("public/");
+    let paths = find_paths("<?php $x = '../config.php';", "public/mod/forum/lib.php", &notation);
+    assert_eq!(paths.len(), 1);
+    assert_eq!(paths[0].kind, PathKind::DotsLiteral);
+    assert_eq!(paths[0].real_path, "public/mod/config.php");
+}
+
+/// A dots-literal as the leading operand of a concatenation is resolved the same way as a bare
+/// one; text later in the concatenation is taken verbatim, not dirname-resolved.
+#[test]
+fn dots_literal_as_concat_leftmost() {
+    let notation = PathNotation::new("public/");
+    let paths = find_paths("<?php $x = '../config' . '.php';", "public/mod/forum/lib.php", &notation);
+    assert_eq!(paths.len(), 1);
+    assert_eq!(paths[0].kind, PathKind::DotsLiteral);
+    assert_eq!(paths[0].real_path, "public/mod/config.php");
+}
+
+/// A bare literal that neither starts with '../' nor sits inside a require/include is not a
+/// recognised path at all.
+#[test]
+fn bare_literal_without_dots_or_require_is_not_a_path() {
+    let notation = PathNotation::new("public/");
+    let paths = find_paths("<?php $x = 'lib.php';", "public/mod/forum/lib.php", &notation);
+    assert_eq!(paths.len(), 0);
 }

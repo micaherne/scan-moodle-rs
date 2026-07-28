@@ -11,8 +11,9 @@
 				"rust-lang.rust-analyzer",
 				"tamasfe.even-better-toml",
 				"vadimcn.vscode-lldb",
-				"serayuzgur.crates",
-				"anthropic.claude-code"
+				"fill-labs.dependi",
+				"anthropic.claude-code",
+				"robinreiche.csv-grid-editor"
 			],
 			"settings": {
 				"editor.formatOnSave": true,

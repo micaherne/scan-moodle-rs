@@ -13,6 +13,7 @@ use walkdir::WalkDir;
 
 use scan_moodle::moodle::components::discover_components;
 use scan_moodle::moodle::resolver::ComponentResolver;
+use scan_moodle::moodle::thirdparty;
 use scan_moodle::path_finder::{PathNotation, find_paths};
 
 /// Byte-order mark that hints to Excel that the CSV that follows is UTF-8.
@@ -114,24 +115,22 @@ fn find_paths_command(root: &Path, output_file: Option<&Path>, resolve_component
 
     let notation = PathNotation::from_root(root);
 
-    let resolver = if resolve_components {
-        match discover_components(root) {
-            Ok(discovered) => Some(ComponentResolver::new(&discovered)),
-            Err(err) => {
-                eprintln!("error: failed to discover components: {err}");
-                return ExitCode::FAILURE;
-            }
+    let discovered = match discover_components(root) {
+        Ok(discovered) => discovered,
+        Err(err) => {
+            eprintln!("error: failed to discover components: {err}");
+            return ExitCode::FAILURE;
         }
-    } else {
-        None
     };
+    let thirdparty_locations = thirdparty::find_thirdparty_locations(root, &discovered);
+    let resolver = resolve_components.then(|| ComponentResolver::new(&discovered));
 
     let scanned = AtomicUsize::new(0);
     let failed = AtomicUsize::new(0);
     let found = AtomicUsize::new(0);
     let start = Instant::now();
 
-    let mut header = vec!["file", "code", "glyph_path", "real_path"];
+    let mut header = vec!["file", "line", "start", "end", "code", "kind", "glyph_path", "real_path"];
     if resolve_components {
         header.extend(["source_component", "target_component", "path_in_component"]);
     }
@@ -144,6 +143,7 @@ fn find_paths_command(root: &Path, output_file: Option<&Path>, resolve_component
 
     WalkDir::new(root)
         .into_iter()
+        .filter_entry(|entry| !thirdparty::is_thirdparty(&thirdparty_locations, &relative_unix_path(root, entry.path())))
         .filter_map(|entry| entry.ok())
         .filter(|entry| entry.file_type().is_file())
         .map(|entry| entry.into_path())
@@ -179,7 +179,11 @@ fn find_paths_command(root: &Path, output_file: Option<&Path>, resolve_component
                 .map(|result| {
                     let mut record = vec![
                         sanitize(&relative),
+                        result.line.to_string(),
+                        result.start_pos.map(|pos| pos.to_string()).unwrap_or_default(),
+                        result.end_pos.map(|pos| pos.to_string()).unwrap_or_default(),
                         sanitize(&result.code),
+                        result.kind.to_string(),
                         sanitize(&result.path),
                         sanitize(&result.real_path),
                     ];

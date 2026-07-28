@@ -11,16 +11,25 @@
 //! the final step converts the dirroot portion back to '@' (e.g. '#/public/lib/setup.php' becomes
 //! '@/lib/setup.php'). Files that live above dirroot keep their '#' path.
 //!
-//! Detection: recognises paths starting with $CFG->dirroot, $CFG->libdir, __DIR__, __FILE__,
-//! dirname(__FILE__), or an interpolated string whose first interpolated value is
-//! $CFG->dirroot/libdir. For concat chains, the leftmost leaf is checked so 'a . b . c' is
+//! Detection: recognises paths starting with $CFG->dirroot, $CFG->libdir, $CFG->root, __DIR__,
+//! __FILE__, dirname(__FILE__), or an interpolated string whose first interpolated value is
+//! $CFG->dirroot/libdir/root. For concat chains, the leftmost leaf is checked so 'a . b . c' is
 //! identified by its first element.
+//!
+//! Two further, much more speculative, kinds of literal are also recognised, both resolved
+//! relative to the current file's directory (as if implicitly prefixed with `__DIR__ . '/'`):
+//!   - A bare string literal used as the *sole* value of a require/include construct — no
+//!     concatenation, no wrapping expression — is treated as definitely a path.
+//!   - A string literal starting with '../', standalone or as the leading operand of a
+//!     concatenation, is also recorded, but with no such certainty.
+//!
+//! Every result records a [`super::PathKind`] identifying which of these anchored it.
 //!
 //! Extraction: maps each node in the expression to a path segment, relative to the repository
 //! root:
 //!   - $CFG->dirroot => the dirroot prefix (e.g. '/public'), $CFG->libdir => '<dirroot>/lib',
-//!     $CFG->admin => 'admin' (the bare directory name, always used as
-//!     "$CFG->dirroot/$CFG->admin")
+//!     $CFG->root => '' (the bare repository root), $CFG->admin => 'admin' (the bare directory
+//!     name, always used as "$CFG->dirroot/$CFG->admin")
 //!   - __DIR__ => '/dir/of/current/file', dirname(__FILE__) => directory N levels up
 //!   - String literals => their value
 //!   - Interpolated strings => recursively built from their parts
@@ -66,6 +75,7 @@ use mago_syntax::cst::Variable;
 use mago_syntax::walker;
 use mago_syntax::walker::Walker;
 
+use super::PathKind;
 use super::PathNotation;
 use super::PathResult;
 
@@ -126,21 +136,37 @@ impl<'ast, 'arena, 'ctx> Walker<'ast, 'arena, Context<'ctx>> for PathFindingWalk
     }
 
     fn walk_include_construct(&self, construct: &'ast IncludeConstruct<'arena>, context: &mut Context<'ctx>) {
+        if let Some(result) = build_require_literal_result(construct.value, Some("include".to_string()), context) {
+            context.paths.push(result);
+            return;
+        }
         context.pending_parent = Some("include".to_string());
         self.walk_expression(construct.value, context);
     }
 
     fn walk_include_once_construct(&self, construct: &'ast IncludeOnceConstruct<'arena>, context: &mut Context<'ctx>) {
+        if let Some(result) = build_require_literal_result(construct.value, Some("include_once".to_string()), context) {
+            context.paths.push(result);
+            return;
+        }
         context.pending_parent = Some("include_once".to_string());
         self.walk_expression(construct.value, context);
     }
 
     fn walk_require_construct(&self, construct: &'ast RequireConstruct<'arena>, context: &mut Context<'ctx>) {
+        if let Some(result) = build_require_literal_result(construct.value, Some("require".to_string()), context) {
+            context.paths.push(result);
+            return;
+        }
         context.pending_parent = Some("require".to_string());
         self.walk_expression(construct.value, context);
     }
 
     fn walk_require_once_construct(&self, construct: &'ast RequireOnceConstruct<'arena>, context: &mut Context<'ctx>) {
+        if let Some(result) = build_require_literal_result(construct.value, Some("require_once".to_string()), context) {
+            context.paths.push(result);
+            return;
+        }
         context.pending_parent = Some("require_once".to_string());
         self.walk_expression(construct.value, context);
     }
@@ -176,21 +202,76 @@ impl<'ast, 'arena, 'ctx> Walker<'ast, 'arena, Context<'ctx>> for PathFindingWalk
 }
 
 fn build_result(expr: &Expression<'_>, parent: Option<String>, context: &Context<'_>) -> PathResult {
-    let span = expr.span();
-    let source = context.file.contents.as_ref();
     // `is_potential_path` guarantees `extract_path` returns `Some`.
     let (real_path, path) = extract_path(expr, context).expect("potential path must be extractable");
+    build_path_result(
+        expr,
+        parent,
+        context,
+        classify_kind(expr),
+        real_path,
+        path,
+        extract_separator(expr),
+        extract_mono_path_expr(expr, context),
+    )
+}
+
+/// If `value` is a bare string literal — no concatenation, no other wrapping expression, modulo
+/// redundant parentheses — it is treated as definitely a path: resolved relative to the current
+/// file's directory, as if it were `__DIR__ . '/' . $value`.
+fn build_require_literal_result(value: &Expression<'_>, parent: Option<String>, context: &Context<'_>) -> Option<PathResult> {
+    let literal = unwrap_parens(value);
+    if !matches!(literal, Expression::Literal(Literal::String(_))) {
+        return None;
+    }
+    let repo_relative = PathNotation::normalise(&dirname_relative(&node_to_segment(literal, context), context));
+    let glyph = context.notation.to_glyph(&repo_relative);
+    Some(build_path_result(
+        literal,
+        parent,
+        context,
+        PathKind::RequireLiteral,
+        repo_relative.trim_start_matches('/').to_string(),
+        glyph,
+        String::new(),
+        String::new(),
+    ))
+}
+
+fn build_path_result(
+    expr: &Expression<'_>,
+    parent: Option<String>,
+    context: &Context<'_>,
+    kind: PathKind,
+    real_path: String,
+    path: String,
+    separator: String,
+    mono_path_expr: String,
+) -> PathResult {
+    let span = expr.span();
+    let source = context.file.contents.as_ref();
     PathResult {
         path,
         real_path,
+        kind,
         line: context.file.line_number(span.start_offset()) + 1,
         code: source_text(source, span).into_owned(),
         parent,
         start_pos: Some(span.start_offset() as usize),
         end_pos: Some(span.end_offset() as usize),
-        separator: extract_separator(expr),
-        mono_path_expr: extract_mono_path_expr(expr, context),
+        separator,
+        mono_path_expr,
     }
+}
+
+/// Strips any redundant parentheses around `expr` (e.g. `require(('x.php'))` is just `'x.php'`).
+/// Elsewhere in this module, walking a `Parenthesized` node's child achieves the same thing for
+/// free by simply recursing into it; this is only needed where that recursion is bypassed.
+fn unwrap_parens<'e>(mut expr: &'e Expression<'e>) -> &'e Expression<'e> {
+    while let Expression::Parenthesized(parenthesized) = expr {
+        expr = parenthesized.expression;
+    }
+    expr
 }
 
 /// If `expr` is a string-concatenation `Binary`, its `(lhs, rhs)`.
@@ -202,45 +283,107 @@ fn as_concat<'e>(expr: &'e Expression<'e>) -> Option<(&'e Expression<'e>, &'e Ex
 }
 
 /// True if `node` is the root of an expression that resolves to a path within the codebase.
+///
+/// The interpolated-string check (both here and as a concat's leftmost leaf) only ever
+/// recognises $CFG->dirroot/libdir/root, not the wider set below — an interpolated string can
+/// only ever *start* with a literal or an expression, and only the latter can meaningfully be one
+/// of these roots.
 pub(super) fn is_potential_path<'e>(expr: &'e Expression<'e>) -> bool {
     if as_concat(expr).is_some() {
         let leftmost = leftmost_concat_leaf(expr);
-        return is_cfg_dirroot_or_libdir(leftmost)
-            || matches!(leftmost, Expression::MagicConstant(MagicConstant::Directory(_)))
-            || matches!(leftmost, Expression::MagicConstant(MagicConstant::File(_)))
-            || is_dirname_of_file_or_dir(leftmost)
+        return is_path_root(leftmost)
             || matches!(
                 leftmost,
                 Expression::CompositeString(CompositeString::Interpolated(interpolated))
-                    if first_meaningful_expr(interpolated).is_some_and(is_cfg_dirroot_or_libdir)
+                    if first_meaningful_expr(interpolated).is_some_and(is_cfg_dirroot_libdir_or_root)
             );
     }
     match expr {
         Expression::CompositeString(CompositeString::Interpolated(interpolated)) => {
-            first_meaningful_expr(interpolated).is_some_and(is_cfg_dirroot_or_libdir)
+            first_meaningful_expr(interpolated).is_some_and(is_cfg_dirroot_libdir_or_root)
         }
-        Expression::Access(Access::Property(_)) => is_cfg_dirroot_or_libdir(expr),
+        Expression::Access(Access::Property(_)) => is_cfg_dirroot_libdir_or_root(expr),
+        Expression::Literal(Literal::String(_)) => is_dots_literal(expr),
         _ => false,
     }
+}
+
+/// True if `expr` is one of the roots recognised as the leading operand of a concatenation:
+/// $CFG->dirroot/libdir/root, __DIR__/__FILE__ (or a dirname(...) chain over them), or a
+/// dots-literal.
+fn is_path_root(expr: &Expression<'_>) -> bool {
+    is_cfg_dirroot_libdir_or_root(expr)
+        || matches!(expr, Expression::MagicConstant(MagicConstant::Directory(_)))
+        || matches!(expr, Expression::MagicConstant(MagicConstant::File(_)))
+        || is_dirname_of_file_or_dir(expr)
+        || is_dots_literal(expr)
 }
 
 fn is_cfg_variable(expr: &Expression<'_>) -> bool {
     matches!(expr, Expression::Variable(Variable::Direct(variable)) if variable.name == b"$CFG")
 }
 
-fn is_cfg_dirroot_or_libdir(expr: &Expression<'_>) -> bool {
+fn is_cfg_property(expr: &Expression<'_>, name: &[u8]) -> bool {
     let Expression::Access(Access::Property(PropertyAccess { object, property, .. })) = expr else {
         return false;
     };
-    is_cfg_variable(object)
-        && matches!(property, ClassLikeMemberSelector::Identifier(id) if id.value == b"dirroot" || id.value == b"libdir")
+    is_cfg_variable(object) && matches!(property, ClassLikeMemberSelector::Identifier(id) if id.value == name)
+}
+
+fn is_cfg_dirroot_libdir_or_root(expr: &Expression<'_>) -> bool {
+    is_cfg_dirroot(expr) || is_cfg_libdir(expr) || is_cfg_root(expr)
 }
 
 fn is_cfg_dirroot(expr: &Expression<'_>) -> bool {
-    let Expression::Access(Access::Property(PropertyAccess { object, property, .. })) = expr else {
+    is_cfg_property(expr, b"dirroot")
+}
+
+fn is_cfg_libdir(expr: &Expression<'_>) -> bool {
+    is_cfg_property(expr, b"libdir")
+}
+
+fn is_cfg_root(expr: &Expression<'_>) -> bool {
+    is_cfg_property(expr, b"root")
+}
+
+/// True if `expr` is a plain string literal whose value starts with '../'. Much more speculative
+/// than the other roots: not every such literal is actually a file path.
+fn is_dots_literal(expr: &Expression<'_>) -> bool {
+    let Expression::Literal(Literal::String(string)) = expr else {
         return false;
     };
-    is_cfg_variable(object) && matches!(property, ClassLikeMemberSelector::Identifier(id) if id.value == b"dirroot")
+    decode_literal(string.raw, string.value).starts_with("../")
+}
+
+/// Determines which root identified an already-confirmed potential path (see
+/// [`is_potential_path`]/[`is_path_root`]).
+fn classify_kind(expr: &Expression<'_>) -> PathKind {
+    let mut anchor = if as_concat(expr).is_some() {
+        leftmost_concat_leaf(expr)
+    } else if let Expression::CompositeString(CompositeString::Interpolated(interpolated)) = expr {
+        first_meaningful_expr(interpolated).expect("is_potential_path guarantees an anchor expression")
+    } else {
+        expr
+    };
+    // The leftmost leaf of a concat can itself be an interpolated string (e.g.
+    // `"{$CFG->dirroot}" . $x`); unwrap one more level to reach the actual anchor.
+    if let Expression::CompositeString(CompositeString::Interpolated(interpolated)) = anchor {
+        anchor = first_meaningful_expr(interpolated).unwrap_or(anchor);
+    }
+
+    if is_cfg_dirroot(anchor) {
+        PathKind::Dirroot
+    } else if is_cfg_libdir(anchor) {
+        PathKind::Libdir
+    } else if is_cfg_root(anchor) {
+        PathKind::Root
+    } else if matches!(anchor, Expression::MagicConstant(MagicConstant::File(_))) {
+        PathKind::File
+    } else if matches!(anchor, Expression::MagicConstant(MagicConstant::Directory(_))) || is_dirname_of_file_or_dir(anchor) {
+        PathKind::Dir
+    } else {
+        PathKind::DotsLiteral
+    }
 }
 
 /// True if `node` is the $CFG->dirroot root of a concat: either $CFG->dirroot itself, or the
@@ -418,6 +561,8 @@ fn node_to_segment(expr: &Expression<'_>, context: &Context<'_>) -> String {
             match id.value {
                 b"dirroot" => context.notation.dirroot_segment().to_string(),
                 b"libdir" => format!("{}/lib", context.notation.dirroot_segment()),
+                // The bare repository root itself: zero path segments below it.
+                b"root" => String::new(),
                 // $CFG->admin is the admin directory *name* (default 'admin'), always written as
                 // "$CFG->dirroot/$CFG->admin/...", so it contributes only the bare segment.
                 b"admin" => "admin".to_string(),
@@ -439,6 +584,25 @@ fn build_from_parts(parts: &[&Expression<'_>], context: &Context<'_>) -> String 
     parts.iter().map(|part| node_to_segment(part, context)).collect()
 }
 
+/// `literal_value` (the plain text of a string literal), resolved as if it were
+/// `__DIR__ . '/' . $literal_value` — relative to the current file's directory.
+fn dirname_relative(literal_value: &str, context: &Context<'_>) -> String {
+    let dir = php_dirname(context.current_file);
+    if dir == "." { format!("/{literal_value}") } else { format!("/{dir}/{literal_value}") }
+}
+
+/// The repository-root-relative contribution of `expr` when it acts as the leading anchor of a
+/// path expression (the first operand of a concatenation, or the whole expression when there is
+/// none). Unlike [`node_to_segment`], a dots-literal here is resolved relative to the current
+/// file's directory — that implicit prefix only applies to the anchor itself, never to a literal
+/// appearing later in a concatenation.
+fn anchor_segment(expr: &Expression<'_>, context: &Context<'_>) -> String {
+    if is_dots_literal(expr) {
+        return dirname_relative(&node_to_segment(expr, context), context);
+    }
+    node_to_segment(expr, context)
+}
+
 fn build_from_interpolated(interpolated: &InterpolatedString<'_>, context: &Context<'_>) -> String {
     let mut result = String::new();
     for part in interpolated.parts.iter() {
@@ -457,15 +621,21 @@ fn extract_path(expr: &Expression<'_>, context: &Context<'_>) -> Option<(String,
     let repo_relative = if as_concat(expr).is_some() {
         let mut parts = Vec::new();
         flatten_concat(expr, &mut parts);
-        PathNotation::normalise(&build_from_parts(&parts, context))
+        let (anchor, rest) = parts.split_first().expect("a concat always flattens to at least two parts");
+        PathNotation::normalise(&format!("{}{}", anchor_segment(anchor, context), build_from_parts(rest, context)))
     } else {
         match expr {
             Expression::CompositeString(CompositeString::Interpolated(interpolated)) => {
                 PathNotation::normalise(&build_from_interpolated(interpolated, context))
             }
-            // A bare $CFG->dirroot/libdir is not normalised, so a trailing slash from e.g.
+            // A bare $CFG->dirroot/libdir/root is not normalised, so a trailing slash from e.g.
             // "$CFG->dirroot . '/'" stays distinct from the bare value.
             Expression::Access(Access::Property(_)) => node_to_segment(expr, context),
+            // A bare dots-literal is itself the anchor, so it is resolved relative to the current
+            // file's directory rather than taken at face value.
+            Expression::Literal(Literal::String(_)) if is_dots_literal(expr) => {
+                PathNotation::normalise(&anchor_segment(expr, context))
+            }
             _ => return None,
         }
     };

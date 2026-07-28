@@ -7,4 +7,4 @@ mod result;
 
 pub use finder::find_paths;
 pub use notation::PathNotation;
-pub use result::PathResult;
+pub use result::{PathKind, PathResult};
