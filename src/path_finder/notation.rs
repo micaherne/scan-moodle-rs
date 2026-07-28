@@ -5,6 +5,8 @@
 //! The dirroot prefix is the path from the repository root to dirroot — 'public/' since Moodle
 //! 5.1, or '' for earlier layouts where the two roots coincide.
 
+use std::path::Path;
+
 #[derive(Debug, Clone)]
 pub struct PathNotation {
     /// The dirroot path relative to the repository root, with a leading slash (e.g. '/public').
@@ -16,6 +18,11 @@ impl PathNotation {
         let prefix = dirroot_prefix.trim_matches('/');
         let dirroot_segment = if prefix.is_empty() { String::new() } else { format!("/{prefix}") };
         Self { dirroot_segment }
+    }
+
+    /// Builds the notation for a codebase at `root`, auto-detecting the dirroot prefix.
+    pub fn from_root(root: &Path) -> Self {
+        Self::new(crate::moodle::dirroot_prefix(root))
     }
 
     pub fn dirroot_segment(&self) -> &str {

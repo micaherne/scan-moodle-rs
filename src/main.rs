@@ -1,3 +1,4 @@
+use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -5,15 +6,71 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
+use clap::{Parser, Subcommand};
+use csv::WriterBuilder;
 use rayon::prelude::*;
 use walkdir::WalkDir;
 
+use scan_moodle::moodle::components::discover_components;
 use scan_moodle::path_finder::{PathNotation, find_paths};
 
-/// Since Moodle 5.1, $CFG->dirroot lives in a 'public/' subdirectory of the repository root;
-/// earlier layouts have dirroot and the repository root coincide.
-fn detect_dirroot_prefix(root: &Path) -> &'static str {
-    if root.join("public").join("lib").join("setup.php").is_file() { "public/" } else { "" }
+/// Byte-order mark that hints to Excel that the CSV that follows is UTF-8.
+const UTF8_BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
+
+#[derive(Parser)]
+#[command(version)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Scan a Moodle codebase for path references
+    FindPaths {
+        /// Path to the Moodle codebase to scan
+        root: PathBuf,
+        /// Write CSV output to this file instead of stdout
+        #[arg(short = 'o', long = "output-file")]
+        output_file: Option<PathBuf>,
+    },
+    /// List all components (core, subsystems, plugins and subplugins) in a Moodle codebase
+    FindComponents {
+        /// Path to the Moodle codebase to scan
+        root: PathBuf,
+        /// Write CSV output to this file instead of stdout
+        #[arg(short = 'o', long = "output-file")]
+        output_file: Option<PathBuf>,
+        /// Output the subsystem and plugin type directories instead of individual components
+        #[arg(long = "type-dirs")]
+        type_dirs: bool,
+    },
+}
+
+/// Builds a CSV writer with a UTF-8 BOM and CRLF line terminator for Excel compatibility,
+/// writing to `output_file` if given, or stdout otherwise. Writes `header` as the first record.
+fn create_csv_writer(
+    output_file: Option<&Path>,
+    header: &[&str],
+) -> Result<csv::Writer<BufWriter<Box<dyn Write + Send>>>, ExitCode> {
+    let writer: Box<dyn Write + Send> = match output_file {
+        Some(path) => match File::create(path) {
+            Ok(file) => Box::new(file),
+            Err(err) => {
+                eprintln!("error: failed to create {}: {err}", path.display());
+                return Err(ExitCode::FAILURE);
+            }
+        },
+        None => Box::new(std::io::stdout()),
+    };
+
+    let mut writer = BufWriter::new(writer);
+    writer.write_all(&UTF8_BOM).ok();
+
+    let mut csv_writer = WriterBuilder::new().terminator(csv::Terminator::CRLF).from_writer(writer);
+    csv_writer.write_record(header).ok();
+
+    Ok(csv_writer)
 }
 
 /// `path`, relative to `root`, as a forward-slash-separated string.
@@ -26,34 +83,43 @@ fn relative_unix_path(root: &Path, path: &Path) -> String {
         .join("/")
 }
 
-/// Collapses a field onto a single line so the tab-separated stdout output stays one record per
-/// line.
+/// Collapses a field onto a single line so each CSV record stays one row in Excel.
 fn sanitize(field: &str) -> String {
     field.replace('\t', " ").replace('\n', "\\n")
 }
 
 fn main() -> ExitCode {
-    let mut args = std::env::args_os().skip(1);
-    let Some(root) = args.next().map(PathBuf::from) else {
-        eprintln!("usage: scan-moodle <path-to-moodle-codebase>");
-        return ExitCode::FAILURE;
-    };
+    let cli = Cli::parse();
 
+    match cli.command {
+        Commands::FindPaths { root, output_file } => find_paths_command(&root, output_file.as_deref()),
+        Commands::FindComponents { root, output_file, type_dirs } => {
+            find_components_command(&root, output_file.as_deref(), type_dirs)
+        }
+    }
+}
+
+fn find_paths_command(root: &Path, output_file: Option<&Path>) -> ExitCode {
     if !root.is_dir() {
         eprintln!("error: {} is not a directory", root.display());
         return ExitCode::FAILURE;
     }
 
-    let notation = PathNotation::new(detect_dirroot_prefix(&root));
+    let notation = PathNotation::from_root(root);
 
     let scanned = AtomicUsize::new(0);
     let failed = AtomicUsize::new(0);
     let found = AtomicUsize::new(0);
     let start = Instant::now();
 
-    let out = Mutex::new(BufWriter::new(std::io::stdout()));
+    let csv_writer = match create_csv_writer(output_file, &["file", "code", "glyph_path", "real_path"]) {
+        Ok(writer) => writer,
+        Err(code) => return code,
+    };
 
-    WalkDir::new(&root)
+    let out = Mutex::new(csv_writer);
+
+    WalkDir::new(root)
         .into_iter()
         .filter_map(|entry| entry.ok())
         .filter(|entry| entry.file_type().is_file())
@@ -62,7 +128,7 @@ fn main() -> ExitCode {
         .par_bridge()
         .for_each(|path| {
             scanned.fetch_add(1, Ordering::Relaxed);
-            let relative = relative_unix_path(&root, &path);
+            let relative = relative_unix_path(root, &path);
             let bytes = match std::fs::read(&path) {
                 Ok(bytes) => bytes,
                 Err(err) => {
@@ -80,7 +146,9 @@ fn main() -> ExitCode {
             found.fetch_add(results.len(), Ordering::Relaxed);
             let mut out = out.lock().unwrap();
             for result in &results {
-                writeln!(out, "{}\t{}\t{}", sanitize(&relative), sanitize(&result.code), sanitize(&result.path)).ok();
+                let real_path = notation.to_repo_path(&result.path);
+                out.write_record([sanitize(&relative), sanitize(&result.code), sanitize(&result.path), sanitize(&real_path)])
+                    .ok();
             }
         });
 
@@ -92,6 +160,53 @@ fn main() -> ExitCode {
     if failed > 0 {
         eprintln!("Failed to read {failed} files");
     }
+
+    ExitCode::SUCCESS
+}
+
+fn find_components_command(root: &Path, output_file: Option<&Path>, type_dirs: bool) -> ExitCode {
+    if !root.is_dir() {
+        eprintln!("error: {} is not a directory", root.display());
+        return ExitCode::FAILURE;
+    }
+
+    let discovered = match discover_components(root) {
+        Ok(discovered) => discovered,
+        Err(err) => {
+            eprintln!("error: failed to read components: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if type_dirs {
+        let mut csv_writer = match create_csv_writer(output_file, &["kind", "name", "path"]) {
+            Ok(writer) => writer,
+            Err(code) => return code,
+        };
+        for (name, path) in &discovered.subsystems {
+            csv_writer.write_record(["subsystem", name, path.as_deref().unwrap_or("")]).ok();
+        }
+        for (name, path) in &discovered.plugin_types {
+            csv_writer.write_record(["plugintype", name, path]).ok();
+        }
+        csv_writer.flush().ok();
+
+        eprintln!("Found {} subsystems and {} plugin types", discovered.subsystems.len(), discovered.plugin_types.len());
+
+        return ExitCode::SUCCESS;
+    }
+
+    let mut csv_writer = match create_csv_writer(output_file, &["component", "path"]) {
+        Ok(writer) => writer,
+        Err(code) => return code,
+    };
+
+    for (component, path) in &discovered.components {
+        csv_writer.write_record([component.as_str(), path.as_str()]).ok();
+    }
+    csv_writer.flush().ok();
+
+    eprintln!("Found {} components", discovered.components.len());
 
     ExitCode::SUCCESS
 }
