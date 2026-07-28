@@ -303,20 +303,17 @@ pub(super) fn is_potential_path<'e>(expr: &'e Expression<'e>) -> bool {
             first_meaningful_expr(interpolated).is_some_and(is_cfg_dirroot_libdir_or_root)
         }
         Expression::Access(Access::Property(_)) => is_cfg_dirroot_libdir_or_root(expr),
-        Expression::Literal(Literal::String(_)) => is_dots_literal(expr),
         _ => false,
     }
 }
 
 /// True if `expr` is one of the roots recognised as the leading operand of a concatenation:
-/// $CFG->dirroot/libdir/root, __DIR__/__FILE__ (or a dirname(...) chain over them), or a
-/// dots-literal.
+/// $CFG->dirroot/libdir/root, or __DIR__/__FILE__ (or a dirname(...) chain over them).
 fn is_path_root(expr: &Expression<'_>) -> bool {
     is_cfg_dirroot_libdir_or_root(expr)
         || matches!(expr, Expression::MagicConstant(MagicConstant::Directory(_)))
         || matches!(expr, Expression::MagicConstant(MagicConstant::File(_)))
         || is_dirname_of_file_or_dir(expr)
-        || is_dots_literal(expr)
 }
 
 fn is_cfg_variable(expr: &Expression<'_>) -> bool {
@@ -346,15 +343,6 @@ fn is_cfg_root(expr: &Expression<'_>) -> bool {
     is_cfg_property(expr, b"root")
 }
 
-/// True if `expr` is a plain string literal whose value starts with '../'. Much more speculative
-/// than the other roots: not every such literal is actually a file path.
-fn is_dots_literal(expr: &Expression<'_>) -> bool {
-    let Expression::Literal(Literal::String(string)) = expr else {
-        return false;
-    };
-    decode_literal(string.raw, string.value).starts_with("../")
-}
-
 /// Determines which root identified an already-confirmed potential path (see
 /// [`is_potential_path`]/[`is_path_root`]).
 fn classify_kind(expr: &Expression<'_>) -> PathKind {
@@ -382,7 +370,8 @@ fn classify_kind(expr: &Expression<'_>) -> PathKind {
     } else if matches!(anchor, Expression::MagicConstant(MagicConstant::Directory(_))) || is_dirname_of_file_or_dir(anchor) {
         PathKind::Dir
     } else {
-        PathKind::DotsLiteral
+        // is_potential_path/is_path_root guarantee the anchor is one of the cases above.
+        unreachable!("unrecognised path root")
     }
 }
 
@@ -549,11 +538,16 @@ fn node_to_segment(expr: &Expression<'_>, context: &Context<'_>) -> String {
             if matches!(inner, Expression::MagicConstant(MagicConstant::Directory(_))) {
                 depth += 1;
             }
+            // `current_file` is repository-relative, so php_dirname sticks at '.' once it reaches
+            // the top; the real __DIR__ is absolute and keeps climbing. Count the levels that go
+            // past the repository root and emit them as '..' segments, so a path that leaves the
+            // repository is not clamped onto an unrelated location inside it.
             let mut dir = context.current_file.to_string();
+            let mut above_root = 0;
             for _ in 0..depth {
-                dir = php_dirname(&dir);
+                if dir == "." { above_root += 1 } else { dir = php_dirname(&dir) }
             }
-            if dir == "." { String::new() } else { format!("/{dir}") }
+            if dir == "." { "/..".repeat(above_root) } else { format!("/{dir}") }
         }
         Expression::Access(Access::Property(PropertyAccess { object, property: ClassLikeMemberSelector::Identifier(id), .. }))
             if is_cfg_variable(object) =>
@@ -591,18 +585,6 @@ fn dirname_relative(literal_value: &str, context: &Context<'_>) -> String {
     if dir == "." { format!("/{literal_value}") } else { format!("/{dir}/{literal_value}") }
 }
 
-/// The repository-root-relative contribution of `expr` when it acts as the leading anchor of a
-/// path expression (the first operand of a concatenation, or the whole expression when there is
-/// none). Unlike [`node_to_segment`], a dots-literal here is resolved relative to the current
-/// file's directory — that implicit prefix only applies to the anchor itself, never to a literal
-/// appearing later in a concatenation.
-fn anchor_segment(expr: &Expression<'_>, context: &Context<'_>) -> String {
-    if is_dots_literal(expr) {
-        return dirname_relative(&node_to_segment(expr, context), context);
-    }
-    node_to_segment(expr, context)
-}
-
 fn build_from_interpolated(interpolated: &InterpolatedString<'_>, context: &Context<'_>) -> String {
     let mut result = String::new();
     for part in interpolated.parts.iter() {
@@ -622,7 +604,7 @@ fn extract_path(expr: &Expression<'_>, context: &Context<'_>) -> Option<(String,
         let mut parts = Vec::new();
         flatten_concat(expr, &mut parts);
         let (anchor, rest) = parts.split_first().expect("a concat always flattens to at least two parts");
-        PathNotation::normalise(&format!("{}{}", anchor_segment(anchor, context), build_from_parts(rest, context)))
+        PathNotation::normalise(&format!("{}{}", node_to_segment(anchor, context), build_from_parts(rest, context)))
     } else {
         match expr {
             Expression::CompositeString(CompositeString::Interpolated(interpolated)) => {
@@ -631,11 +613,6 @@ fn extract_path(expr: &Expression<'_>, context: &Context<'_>) -> Option<(String,
             // A bare $CFG->dirroot/libdir/root is not normalised, so a trailing slash from e.g.
             // "$CFG->dirroot . '/'" stays distinct from the bare value.
             Expression::Access(Access::Property(_)) => node_to_segment(expr, context),
-            // A bare dots-literal is itself the anchor, so it is resolved relative to the current
-            // file's directory rather than taken at face value.
-            Expression::Literal(Literal::String(_)) if is_dots_literal(expr) => {
-                PathNotation::normalise(&anchor_segment(expr, context))
-            }
             _ => return None,
         }
     };

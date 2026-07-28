@@ -49,10 +49,6 @@ pub enum PathKind {
     /// A bare string literal used as the sole value of a require/include construct — no
     /// concatenation or other wrapping expression — and so treated as definitely a path.
     RequireLiteral,
-    /// A string literal starting with '../', used standalone or as the leading operand of a
-    /// concatenation. Much more speculative than the other kinds: not every such literal is
-    /// actually a file path.
-    DotsLiteral,
 }
 
 impl fmt::Display for PathKind {
@@ -64,7 +60,6 @@ impl fmt::Display for PathKind {
             Self::Dir => "dir",
             Self::File => "file",
             Self::RequireLiteral => "require-literal",
-            Self::DotsLiteral => "dots-literal",
         })
     }
 }

@@ -64,13 +64,21 @@ impl PathNotation {
     /// Resolves '.' and '..' segments in a path, returning it with a single leading slash. A
     /// trailing slash is preserved. This is a pure path operation, independent of the coordinate
     /// system.
+    ///
+    /// A '..' that climbs above the start of the path is kept as a leading '..' rather than
+    /// dropped, so a path pointing outside the repository stays visibly outside it instead of
+    /// being clamped onto an unrelated location inside it.
     pub fn normalise(path: &str) -> String {
         let mut stack: Vec<&str> = Vec::new();
         for part in path.split('/') {
             match part {
                 "." => continue,
                 ".." => {
-                    stack.pop();
+                    if stack.last().is_some_and(|&last| last != "..") {
+                        stack.pop();
+                    } else {
+                        stack.push("..");
+                    }
                 }
                 "" => {
                     if !stack.is_empty() {
@@ -116,6 +124,22 @@ mod tests {
     #[test]
     fn to_repo_path_pre_5_1_repo_root_file() {
         assert_eq!(PathNotation::new("").to_repo_path("#/config.php"), "config.php");
+    }
+
+    #[test]
+    fn normalise_resolves_dot_and_dot_dot() {
+        assert_eq!(PathNotation::normalise("/public/mod/forum/../../lib/setup.php"), "/public/lib/setup.php");
+        assert_eq!(PathNotation::normalise("/public/./lib"), "/public/lib");
+        assert_eq!(PathNotation::normalise("/public/lib/"), "/public/lib/");
+    }
+
+    /// A '..' that climbs past the start of the path is kept, so that a path leaving the
+    /// repository cannot be mistaken for one inside it.
+    #[test]
+    fn normalise_keeps_dot_dot_above_the_root() {
+        assert_eq!(PathNotation::normalise("/public/lib/../../../../etc/passwd"), "/../../etc/passwd");
+        assert_eq!(PathNotation::normalise("/.."), "/..");
+        assert_eq!(PathNotation::normalise("/public/.."), "/");
     }
 
     /// to_repo_path inverts to_glyph for repository-root-relative inputs.

@@ -133,8 +133,7 @@ fn scan_plugin_type(
         }
         let name = entry.file_name().to_string_lossy().into_owned();
 
-        let is_auth_db_exception = plugintype == "auth" && name == "db";
-        if !is_auth_db_exception && IGNORED_DIRS.contains(&name.as_str()) {
+        if is_reserved_non_plugin_dir(plugintype, &name) {
             continue;
         }
         if !is_valid_plugin_name(plugintype, &name, subsystems) {
@@ -173,6 +172,26 @@ fn read_subplugin_types(root: &Path, plugin_dir: &str) -> BTreeMap<String, Strin
             })
             .collect()
     }
+}
+
+/// Whether `name`, found directly under `plugintype`'s root directory, is one of the fixed
+/// non-plugin subdirectories Moodle reserves there — shared infrastructure such as 'tests'
+/// (PHPUnit fixtures), 'classes' (autoloaded classes), 'lang', 'db' (install/upgrade scripts) —
+/// that sits alongside every plugin type's actual plugins without being one itself. 'auth' has one
+/// exception, a plugin literally named 'db' (`\core\component::fetch_plugins`).
+pub(crate) fn is_reserved_non_plugin_dir(plugintype: &str, name: &str) -> bool {
+    let is_auth_db_exception = plugintype == "auth" && name == "db";
+    !is_auth_db_exception && IGNORED_DIRS.contains(&name)
+}
+
+/// Whether `name` could be the directory name of a plugin of *some* type — the union of the two
+/// naming rules below, and so the weakest form of [`is_valid_plugin_name`], which additionally
+/// rules names out per plugin type. A name this rejects can never be a plugin directory,
+/// whichever plugin type root it sits under. This alone does not rule out
+/// [`is_reserved_non_plugin_dir`] names such as 'tests', which are plain, plugin-name-shaped
+/// words in their own right — callers that care about a specific plugin type must check both.
+pub(crate) fn could_be_plugin_name(name: &str) -> bool {
+    is_generic_plugin_name(name) || is_mod_plugin_name(name)
 }
 
 /// This method validates a plugin name. Mirrors `\core\component::is_valid_plugin_name`.

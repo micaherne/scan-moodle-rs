@@ -214,10 +214,11 @@ fn require_bare_literal_resolves_relative_to_current_file() {
     assert_eq!(paths[0].parent, Some("require".to_string()));
 }
 
-/// A require/include's bare literal wins over the (weaker) dots-literal classification, even
-/// when the literal also starts with '../'.
+/// A require/include's bare literal is classified as such regardless of whether it also starts
+/// with '../' — that only affects how it resolves (relative to the current file's directory,
+/// same as any other bare literal), not the classification.
 #[test]
-fn require_bare_dots_literal_is_classified_as_require_literal() {
+fn require_bare_literal_starting_with_dots_resolves_correctly() {
     let notation = PathNotation::new("public/");
     let paths = find_paths("<?php require_once('../config.php');", "public/mod/forum/lib.php", &notation);
     assert_eq!(paths.len(), 1);
@@ -250,33 +251,23 @@ fn require_of_a_concat_is_not_a_bare_literal() {
     assert_eq!(paths.len(), 0);
 }
 
-/// Outside a require/include, a string literal starting with '../' is still recorded, but only
-/// with the much more speculative dots-literal kind.
+/// Outside a require/include, a bare string literal is not a recognised path at all, whether or
+/// not it starts with '../' — matching '../' was found to flag far more non-path strings (e.g.
+/// XPath expressions) than actual file references, so it is not treated as a signal on its own.
 #[test]
-fn bare_dots_literal_outside_require_is_speculative() {
+fn bare_literal_outside_require_is_not_a_path() {
     let notation = PathNotation::new("public/");
-    let paths = find_paths("<?php $x = '../config.php';", "public/mod/forum/lib.php", &notation);
-    assert_eq!(paths.len(), 1);
-    assert_eq!(paths[0].kind, PathKind::DotsLiteral);
-    assert_eq!(paths[0].real_path, "public/mod/config.php");
+    for code in ["<?php $x = 'lib.php';", "<?php $x = '../config.php';"] {
+        let paths = find_paths(code, "public/mod/forum/lib.php", &notation);
+        assert_eq!(paths.len(), 0, "expected no paths for {code}");
+    }
 }
 
-/// A dots-literal as the leading operand of a concatenation is resolved the same way as a bare
-/// one; text later in the concatenation is taken verbatim, not dirname-resolved.
+/// A concatenation whose leftmost operand is a bare literal is not a recognised path either, even
+/// when that literal starts with '../'.
 #[test]
-fn dots_literal_as_concat_leftmost() {
+fn concat_with_bare_literal_leftmost_is_not_a_path() {
     let notation = PathNotation::new("public/");
     let paths = find_paths("<?php $x = '../config' . '.php';", "public/mod/forum/lib.php", &notation);
-    assert_eq!(paths.len(), 1);
-    assert_eq!(paths[0].kind, PathKind::DotsLiteral);
-    assert_eq!(paths[0].real_path, "public/mod/config.php");
-}
-
-/// A bare literal that neither starts with '../' nor sits inside a require/include is not a
-/// recognised path at all.
-#[test]
-fn bare_literal_without_dots_or_require_is_not_a_path() {
-    let notation = PathNotation::new("public/");
-    let paths = find_paths("<?php $x = 'lib.php';", "public/mod/forum/lib.php", &notation);
     assert_eq!(paths.len(), 0);
 }
