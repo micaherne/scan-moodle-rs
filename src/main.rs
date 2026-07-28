@@ -12,6 +12,7 @@ use rayon::prelude::*;
 use walkdir::WalkDir;
 
 use scan_moodle::moodle::components::discover_components;
+use scan_moodle::moodle::resolver::ComponentResolver;
 use scan_moodle::path_finder::{PathNotation, find_paths};
 
 /// Byte-order mark that hints to Excel that the CSV that follows is UTF-8.
@@ -33,6 +34,10 @@ enum Commands {
         /// Write CSV output to this file instead of stdout
         #[arg(short = 'o', long = "output-file")]
         output_file: Option<PathBuf>,
+        /// Add source_component and target_component columns, resolved from the codebase's
+        /// components
+        #[arg(long = "resolve-components")]
+        resolve_components: bool,
     },
     /// List all components (core, subsystems, plugins and subplugins) in a Moodle codebase
     FindComponents {
@@ -92,14 +97,16 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::FindPaths { root, output_file } => find_paths_command(&root, output_file.as_deref()),
+        Commands::FindPaths { root, output_file, resolve_components } => {
+            find_paths_command(&root, output_file.as_deref(), resolve_components)
+        }
         Commands::FindComponents { root, output_file, type_dirs } => {
             find_components_command(&root, output_file.as_deref(), type_dirs)
         }
     }
 }
 
-fn find_paths_command(root: &Path, output_file: Option<&Path>) -> ExitCode {
+fn find_paths_command(root: &Path, output_file: Option<&Path>, resolve_components: bool) -> ExitCode {
     if !root.is_dir() {
         eprintln!("error: {} is not a directory", root.display());
         return ExitCode::FAILURE;
@@ -107,12 +114,28 @@ fn find_paths_command(root: &Path, output_file: Option<&Path>) -> ExitCode {
 
     let notation = PathNotation::from_root(root);
 
+    let resolver = if resolve_components {
+        match discover_components(root) {
+            Ok(discovered) => Some(ComponentResolver::new(&discovered)),
+            Err(err) => {
+                eprintln!("error: failed to discover components: {err}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        None
+    };
+
     let scanned = AtomicUsize::new(0);
     let failed = AtomicUsize::new(0);
     let found = AtomicUsize::new(0);
     let start = Instant::now();
 
-    let csv_writer = match create_csv_writer(output_file, &["file", "code", "glyph_path", "real_path"]) {
+    let mut header = vec!["file", "code", "glyph_path", "real_path"];
+    if resolve_components {
+        header.extend(["source_component", "target_component", "path_in_component"]);
+    }
+    let csv_writer = match create_csv_writer(output_file, &header) {
         Ok(writer) => writer,
         Err(code) => return code,
     };
@@ -144,11 +167,35 @@ fn find_paths_command(root: &Path, output_file: Option<&Path>) -> ExitCode {
             }
 
             found.fetch_add(results.len(), Ordering::Relaxed);
+            // The source file is a real path on disk, so it always has a well-defined component
+            // (if any) and no meaningful sub-path within it.
+            let source_component = resolver.as_ref().and_then(|resolver| resolver.resolve(&relative)).map(|r| r.component);
+
+            // Build every record up front so only the actual write is serialized on `out`;
+            // sanitizing and resolving components are pure computation and should run fully in
+            // parallel across the rayon worker threads.
+            let records: Vec<Vec<String>> = results
+                .iter()
+                .map(|result| {
+                    let mut record = vec![
+                        sanitize(&relative),
+                        sanitize(&result.code),
+                        sanitize(&result.path),
+                        sanitize(&result.real_path),
+                    ];
+                    if let Some(resolver) = &resolver {
+                        let target = resolver.resolve(&result.real_path);
+                        record.push(source_component.clone().unwrap_or_default());
+                        record.push(target.as_ref().map(|r| r.component.clone()).unwrap_or_default());
+                        record.push(target.map(|r| r.path_in_component).unwrap_or_default());
+                    }
+                    record
+                })
+                .collect();
+
             let mut out = out.lock().unwrap();
-            for result in &results {
-                let real_path = notation.to_repo_path(&result.path);
-                out.write_record([sanitize(&relative), sanitize(&result.code), sanitize(&result.path), sanitize(&real_path)])
-                    .ok();
+            for record in records {
+                out.write_record(record).ok();
             }
         });
 

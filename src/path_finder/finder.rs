@@ -178,9 +178,11 @@ impl<'ast, 'arena, 'ctx> Walker<'ast, 'arena, Context<'ctx>> for PathFindingWalk
 fn build_result(expr: &Expression<'_>, parent: Option<String>, context: &Context<'_>) -> PathResult {
     let span = expr.span();
     let source = context.file.contents.as_ref();
+    // `is_potential_path` guarantees `extract_path` returns `Some`.
+    let (real_path, path) = extract_path(expr, context).expect("potential path must be extractable");
     PathResult {
-        // `is_potential_path` guarantees `extract_path` returns `Some`.
-        path: extract_path(expr, context).expect("potential path must be extractable"),
+        path,
+        real_path,
         line: context.file.line_number(span.start_offset()) + 1,
         code: source_text(source, span).into_owned(),
         parent,
@@ -449,23 +451,27 @@ fn build_from_interpolated(interpolated: &InterpolatedString<'_>, context: &Cont
     result
 }
 
-fn extract_path(expr: &Expression<'_>, context: &Context<'_>) -> Option<String> {
-    if as_concat(expr).is_some() {
+/// The repository-root-relative path (no leading slash) that `expr` resolves to, along with its
+/// glyph-notation rendering, if `expr` is a potential path expression.
+fn extract_path(expr: &Expression<'_>, context: &Context<'_>) -> Option<(String, String)> {
+    let repo_relative = if as_concat(expr).is_some() {
         let mut parts = Vec::new();
         flatten_concat(expr, &mut parts);
-        let raw = build_from_parts(&parts, context);
-        return Some(context.notation.to_glyph(&PathNotation::normalise(&raw)));
-    }
-    match expr {
-        Expression::CompositeString(CompositeString::Interpolated(interpolated)) => {
-            let raw = build_from_interpolated(interpolated, context);
-            Some(context.notation.to_glyph(&PathNotation::normalise(&raw)))
+        PathNotation::normalise(&build_from_parts(&parts, context))
+    } else {
+        match expr {
+            Expression::CompositeString(CompositeString::Interpolated(interpolated)) => {
+                PathNotation::normalise(&build_from_interpolated(interpolated, context))
+            }
+            // A bare $CFG->dirroot/libdir is not normalised, so a trailing slash from e.g.
+            // "$CFG->dirroot . '/'" stays distinct from the bare value.
+            Expression::Access(Access::Property(_)) => node_to_segment(expr, context),
+            _ => return None,
         }
-        // A bare $CFG->dirroot/libdir is not normalised, so a trailing slash from e.g.
-        // "$CFG->dirroot . '/'" stays distinct from the bare value.
-        Expression::Access(Access::Property(_)) => Some(context.notation.to_glyph(&node_to_segment(expr, context))),
-        _ => None,
-    }
+    };
+
+    let glyph = context.notation.to_glyph(&repo_relative);
+    Some((repo_relative.trim_start_matches('/').to_string(), glyph))
 }
 
 fn extract_separator(expr: &Expression<'_>) -> String {

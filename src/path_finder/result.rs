@@ -1,8 +1,12 @@
 /// One internal-path reference found in a Moodle file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathResult {
-    /// The resolved path, in glyph notation (e.g. '@/lib/setup.php').
+    /// The resolved path, in glyph notation (e.g. '@/lib/setup.php') — a rendering of
+    /// `real_path`, see [`crate::path_finder::PathNotation::to_glyph`].
     pub path: String,
+    /// The resolved path, relative to the repository root, with no leading slash (e.g.
+    /// 'public/lib/setup.php').
+    pub real_path: String,
     /// 1-indexed source line of the matched expression.
     pub line: u32,
     /// The exact source text of the matched expression.
