@@ -3,6 +3,7 @@
 use std::path::Path;
 
 pub mod components;
+pub mod entrypoints;
 pub mod resolver;
 pub mod thirdparty;
 
@@ -13,4 +14,15 @@ pub mod thirdparty;
 /// earlier layouts have dirroot and the repository root coincide.
 pub fn dirroot_prefix(root: &Path) -> &'static str {
     if root.join("public").join("lib").join("setup.php").is_file() { "public/" } else { "" }
+}
+
+/// Whether `relative_path` (repository-root-relative, no leading slash) must be excluded from
+/// path discovery entirely, rather than merely filtered out of one particular analysis.
+///
+/// 'config-dist.php' is a template showing what a user's config.php should look like — it is
+/// never executed and never required by anything real. Left in, its example
+/// `require_once(__DIR__ . '/lib/setup.php')` line would look like a genuine reference into the
+/// bootstrap chain (see [`entrypoints`]).
+pub fn is_excluded_from_scan(relative_path: &str) -> bool {
+    relative_path == "config-dist.php"
 }

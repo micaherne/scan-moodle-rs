@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -11,10 +12,12 @@ use csv::WriterBuilder;
 use rayon::prelude::*;
 use walkdir::WalkDir;
 
+use scan_moodle::moodle;
 use scan_moodle::moodle::components::discover_components;
+use scan_moodle::moodle::entrypoints::{self, EntrypointKind};
 use scan_moodle::moodle::resolver::ComponentResolver;
 use scan_moodle::moodle::thirdparty;
-use scan_moodle::path_finder::{PathNotation, find_paths};
+use scan_moodle::path_finder::{PathNotation, PathResult, find_paths};
 
 /// Byte-order mark that hints to Excel that the CSV that follows is UTF-8.
 const UTF8_BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
@@ -50,6 +53,20 @@ enum Commands {
         /// Output the subsystem and plugin type directories instead of individual components
         #[arg(long = "type-dirs")]
         type_dirs: bool,
+    },
+    /// Identify Moodle "entry point" (page/CLI) and "bootstrap" files from the codebase's
+    /// require/include graph
+    FindEntrypoints {
+        /// Path to the Moodle codebase to scan
+        root: PathBuf,
+        /// Write CSV output to this file instead of stdout
+        #[arg(short = 'o', long = "output-file")]
+        output_file: Option<PathBuf>,
+        /// Only report files reachable without the synthetic config.php requires chain, which by
+        /// default sweeps every entry point into the bootstrap set too (every page reaches
+        /// component.php via config.php)
+        #[arg(long = "bootstrap-only")]
+        bootstrap_only: bool,
     },
 }
 
@@ -104,7 +121,25 @@ fn main() -> ExitCode {
         Commands::FindComponents { root, output_file, type_dirs } => {
             find_components_command(&root, output_file.as_deref(), type_dirs)
         }
+        Commands::FindEntrypoints { root, output_file, bootstrap_only } => {
+            find_entrypoints_command(&root, output_file.as_deref(), bootstrap_only)
+        }
     }
+}
+
+/// Every PHP file eligible for path-finding analysis, filtered identically for every command that
+/// scans one: third-party vendored code, and anything [`moodle::is_excluded_from_scan`] rules out
+/// (e.g. 'config-dist.php', a template that is never real code).
+fn php_paths<'a>(root: &'a Path, thirdparty_locations: &'a HashSet<String>) -> impl ParallelIterator<Item = PathBuf> + 'a {
+    WalkDir::new(root)
+        .into_iter()
+        .filter_entry(|entry| !thirdparty::is_thirdparty(thirdparty_locations, &relative_unix_path(root, entry.path())))
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_file())
+        .map(|entry| entry.into_path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "php"))
+        .filter(move |path| !moodle::is_excluded_from_scan(&relative_unix_path(root, path)))
+        .par_bridge()
 }
 
 fn find_paths_command(root: &Path, output_file: Option<&Path>, resolve_components: bool) -> ExitCode {
@@ -141,15 +176,7 @@ fn find_paths_command(root: &Path, output_file: Option<&Path>, resolve_component
 
     let out = Mutex::new(csv_writer);
 
-    WalkDir::new(root)
-        .into_iter()
-        .filter_entry(|entry| !thirdparty::is_thirdparty(&thirdparty_locations, &relative_unix_path(root, entry.path())))
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.file_type().is_file())
-        .map(|entry| entry.into_path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "php"))
-        .par_bridge()
-        .for_each(|path| {
+    php_paths(root, &thirdparty_locations).for_each(|path| {
             scanned.fetch_add(1, Ordering::Relaxed);
             let relative = relative_unix_path(root, &path);
             let bytes = match std::fs::read(&path) {
@@ -258,6 +285,77 @@ fn find_components_command(root: &Path, output_file: Option<&Path>, type_dirs: b
     csv_writer.flush().ok();
 
     eprintln!("Found {} components", discovered.components.len());
+
+    ExitCode::SUCCESS
+}
+
+fn find_entrypoints_command(root: &Path, output_file: Option<&Path>, bootstrap_only: bool) -> ExitCode {
+    if !root.is_dir() {
+        eprintln!("error: {} is not a directory", root.display());
+        return ExitCode::FAILURE;
+    }
+
+    let notation = PathNotation::from_root(root);
+
+    let discovered = match discover_components(root) {
+        Ok(discovered) => discovered,
+        Err(err) => {
+            eprintln!("error: failed to discover components: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let thirdparty_locations = thirdparty::find_thirdparty_locations(root, &discovered);
+
+    let failed = AtomicUsize::new(0);
+    let start = Instant::now();
+
+    // Unlike find-paths, this needs every file's results in memory at once, since the
+    // bootstrap/entry-point closures are graph reachability queries over the whole codebase, not
+    // a per-file computation that can be streamed out as it's found.
+    let files: Vec<(String, Vec<PathResult>)> = php_paths(root, &thirdparty_locations)
+        .filter_map(|path| {
+            let relative = relative_unix_path(root, &path);
+            let bytes = match std::fs::read(&path) {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    eprintln!("warning: failed to read {}: {err}", path.display());
+                    failed.fetch_add(1, Ordering::Relaxed);
+                    return None;
+                }
+            };
+            let source = String::from_utf8_lossy(&bytes);
+            let results = find_paths(&source, &relative, &notation);
+            Some((relative, results))
+        })
+        .collect();
+
+    let scanned = files.len();
+    let classifications = entrypoints::classify(&files, &notation, bootstrap_only);
+
+    let mut csv_writer = match create_csv_writer(output_file, &["file", "kind", "line"]) {
+        Ok(writer) => writer,
+        Err(code) => return code,
+    };
+    for classification in &classifications {
+        let record = vec![
+            sanitize(&classification.file),
+            classification.kind.to_string(),
+            classification.line.map(|line| line.to_string()).unwrap_or_default(),
+        ];
+        csv_writer.write_record(record).ok();
+    }
+    csv_writer.flush().ok();
+
+    let elapsed = start.elapsed();
+    let bootstrap_count = classifications.iter().filter(|c| c.kind == EntrypointKind::Bootstrap).count();
+    eprintln!(
+        "Scanned {scanned} PHP files in {elapsed:.2?}, found {} entry points and {bootstrap_count} bootstrap files",
+        classifications.len() - bootstrap_count
+    );
+    let failed = failed.load(Ordering::Relaxed);
+    if failed > 0 {
+        eprintln!("Failed to read {failed} files");
+    }
 
     ExitCode::SUCCESS
 }

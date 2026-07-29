@@ -115,6 +115,16 @@ struct PathFindingWalker;
 
 impl<'ast, 'arena, 'ctx> Walker<'ast, 'arena, Context<'ctx>> for PathFindingWalker {
     fn walk_expression(&self, expression: &'ast Expression<'arena>, context: &mut Context<'ctx>) {
+        // Parentheses carry no meaning of their own, so looking through them must not disturb a
+        // pending parent (an include/require value, or a call argument): recursing into the
+        // generic walker below would otherwise consume it here, on the wrapper itself, and reach
+        // the expression it actually wraps with no parent at all — e.g.
+        // `require_once($CFG->libdir . '/classes/component.php')` (parenthesised, as
+        // require/include's call-like form always is) would lose its "require_once" tag.
+        if let Expression::Parenthesized(parenthesized) = expression {
+            return self.walk_expression(parenthesized.expression, context);
+        }
+
         let parent = context.pending_parent.take();
         if is_potential_path(expression) {
             context.paths.push(build_result(expression, parent, context));
