@@ -90,7 +90,9 @@ fn create_csv_writer(
     let mut writer = BufWriter::new(writer);
     writer.write_all(&UTF8_BOM).ok();
 
-    let mut csv_writer = WriterBuilder::new().terminator(csv::Terminator::CRLF).from_writer(writer);
+    let mut csv_writer = WriterBuilder::new()
+        .terminator(csv::Terminator::CRLF)
+        .from_writer(writer);
     csv_writer.write_record(header).ok();
 
     Ok(csv_writer)
@@ -111,29 +113,64 @@ fn sanitize(field: &str) -> String {
     field.replace('\t', " ").replace('\n', "\\n")
 }
 
+fn format_summary(
+    scanned: usize,
+    elapsed: std::time::Duration,
+    entrypoint_count: usize,
+    bootstrap_count: usize,
+    bootstrap_only: bool,
+) -> String {
+    if bootstrap_only {
+        format!(
+            "Scanned {scanned} PHP files in {elapsed:.2?}, found {bootstrap_count} bootstrap file{}",
+            if bootstrap_count == 1 { "" } else { "s" }
+        )
+    } else {
+        format!(
+            "Scanned {scanned} PHP files in {elapsed:.2?}, found {entrypoint_count} entry point{} and {bootstrap_count} bootstrap file{}",
+            if entrypoint_count == 1 { "" } else { "s" },
+            if bootstrap_count == 1 { "" } else { "s" }
+        )
+    }
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::FindPaths { root, output_file, resolve_components } => {
-            find_paths_command(&root, output_file.as_deref(), resolve_components)
-        }
-        Commands::FindComponents { root, output_file, type_dirs } => {
-            find_components_command(&root, output_file.as_deref(), type_dirs)
-        }
-        Commands::FindEntrypoints { root, output_file, bootstrap_only } => {
-            find_entrypoints_command(&root, output_file.as_deref(), bootstrap_only)
-        }
+        Commands::FindPaths {
+            root,
+            output_file,
+            resolve_components,
+        } => find_paths_command(&root, output_file.as_deref(), resolve_components),
+        Commands::FindComponents {
+            root,
+            output_file,
+            type_dirs,
+        } => find_components_command(&root, output_file.as_deref(), type_dirs),
+        Commands::FindEntrypoints {
+            root,
+            output_file,
+            bootstrap_only,
+        } => find_entrypoints_command(&root, output_file.as_deref(), bootstrap_only),
     }
 }
 
 /// Every PHP file eligible for path-finding analysis, filtered identically for every command that
 /// scans one: third-party vendored code, and anything [`moodle::is_excluded_from_scan`] rules out
 /// (e.g. 'config-dist.php', a template that is never real code).
-fn php_paths<'a>(root: &'a Path, thirdparty_locations: &'a HashSet<String>) -> impl ParallelIterator<Item = PathBuf> + 'a {
+fn php_paths<'a>(
+    root: &'a Path,
+    thirdparty_locations: &'a HashSet<String>,
+) -> impl ParallelIterator<Item = PathBuf> + 'a {
     WalkDir::new(root)
         .into_iter()
-        .filter_entry(|entry| !thirdparty::is_thirdparty(thirdparty_locations, &relative_unix_path(root, entry.path())))
+        .filter_entry(|entry| {
+            !thirdparty::is_thirdparty(
+                thirdparty_locations,
+                &relative_unix_path(root, entry.path()),
+            )
+        })
         .filter_map(|entry| entry.ok())
         .filter(|entry| entry.file_type().is_file())
         .map(|entry| entry.into_path())
@@ -142,7 +179,11 @@ fn php_paths<'a>(root: &'a Path, thirdparty_locations: &'a HashSet<String>) -> i
         .par_bridge()
 }
 
-fn find_paths_command(root: &Path, output_file: Option<&Path>, resolve_components: bool) -> ExitCode {
+fn find_paths_command(
+    root: &Path,
+    output_file: Option<&Path>,
+    resolve_components: bool,
+) -> ExitCode {
     if !root.is_dir() {
         eprintln!("error: {} is not a directory", root.display());
         return ExitCode::FAILURE;
@@ -165,7 +206,16 @@ fn find_paths_command(root: &Path, output_file: Option<&Path>, resolve_component
     let found = AtomicUsize::new(0);
     let start = Instant::now();
 
-    let mut header = vec!["file", "line", "start", "end", "code", "kind", "glyph_path", "real_path"];
+    let mut header = vec![
+        "file",
+        "line",
+        "start",
+        "end",
+        "code",
+        "kind",
+        "glyph_path",
+        "real_path",
+    ];
     if resolve_components {
         header.extend(["source_component", "target_component", "path_in_component"]);
     }
@@ -177,63 +227,82 @@ fn find_paths_command(root: &Path, output_file: Option<&Path>, resolve_component
     let out = Mutex::new(csv_writer);
 
     php_paths(root, &thirdparty_locations).for_each(|path| {
-            scanned.fetch_add(1, Ordering::Relaxed);
-            let relative = relative_unix_path(root, &path);
-            let bytes = match std::fs::read(&path) {
-                Ok(bytes) => bytes,
-                Err(err) => {
-                    eprintln!("warning: failed to read {}: {err}", path.display());
-                    failed.fetch_add(1, Ordering::Relaxed);
-                    return;
-                }
-            };
-            let source = String::from_utf8_lossy(&bytes);
-            let results = find_paths(&source, &relative, &notation);
-            if results.is_empty() {
+        scanned.fetch_add(1, Ordering::Relaxed);
+        let relative = relative_unix_path(root, &path);
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                eprintln!("warning: failed to read {}: {err}", path.display());
+                failed.fetch_add(1, Ordering::Relaxed);
                 return;
             }
+        };
+        let source = String::from_utf8_lossy(&bytes);
+        let results = find_paths(&source, &relative, &notation);
+        if results.is_empty() {
+            return;
+        }
 
-            found.fetch_add(results.len(), Ordering::Relaxed);
-            // The source file is a real path on disk, so it always has a well-defined component
-            // (if any) and no meaningful sub-path within it.
-            let source_component = resolver.as_ref().and_then(|resolver| resolver.resolve(&relative)).map(|r| r.component);
+        found.fetch_add(results.len(), Ordering::Relaxed);
+        // The source file is a real path on disk, so it always has a well-defined component
+        // (if any) and no meaningful sub-path within it.
+        let source_component = resolver
+            .as_ref()
+            .and_then(|resolver| resolver.resolve(&relative))
+            .map(|r| r.component);
 
-            // Build every record up front so only the actual write is serialized on `out`;
-            // sanitizing and resolving components are pure computation and should run fully in
-            // parallel across the rayon worker threads.
-            let records: Vec<Vec<String>> = results
-                .iter()
-                .map(|result| {
-                    let mut record = vec![
-                        sanitize(&relative),
-                        result.line.to_string(),
-                        result.start_pos.map(|pos| pos.to_string()).unwrap_or_default(),
-                        result.end_pos.map(|pos| pos.to_string()).unwrap_or_default(),
-                        sanitize(&result.code),
-                        result.kind.to_string(),
-                        sanitize(&result.path),
-                        sanitize(&result.real_path),
-                    ];
-                    if let Some(resolver) = &resolver {
-                        let target = resolver.resolve(&result.real_path);
-                        record.push(source_component.clone().unwrap_or_default());
-                        record.push(target.as_ref().map(|r| r.component.clone()).unwrap_or_default());
-                        record.push(target.map(|r| r.path_in_component).unwrap_or_default());
-                    }
-                    record
-                })
-                .collect();
+        // Build every record up front so only the actual write is serialized on `out`;
+        // sanitizing and resolving components are pure computation and should run fully in
+        // parallel across the rayon worker threads.
+        let records: Vec<Vec<String>> = results
+            .iter()
+            .map(|result| {
+                let mut record = vec![
+                    sanitize(&relative),
+                    result.line.to_string(),
+                    result
+                        .start_pos
+                        .map(|pos| pos.to_string())
+                        .unwrap_or_default(),
+                    result
+                        .end_pos
+                        .map(|pos| pos.to_string())
+                        .unwrap_or_default(),
+                    sanitize(&result.code),
+                    result.kind.to_string(),
+                    sanitize(&result.path),
+                    sanitize(&result.real_path),
+                ];
+                if let Some(resolver) = &resolver {
+                    let target = resolver.resolve(&result.real_path);
+                    record.push(source_component.clone().unwrap_or_default());
+                    record.push(
+                        target
+                            .as_ref()
+                            .map(|r| r.component.clone())
+                            .unwrap_or_default(),
+                    );
+                    record.push(target.map(|r| r.path_in_component).unwrap_or_default());
+                }
+                record
+            })
+            .collect();
 
-            let mut out = out.lock().unwrap();
-            for record in records {
-                out.write_record(record).ok();
-            }
-        });
+        let mut out = out.lock().unwrap();
+        for record in records {
+            out.write_record(record).ok();
+        }
+    });
 
     out.into_inner().unwrap().flush().ok();
     let elapsed = start.elapsed();
 
-    eprintln!("Scanned {} PHP files in {:.2?}, found {} paths", scanned.load(Ordering::Relaxed), elapsed, found.load(Ordering::Relaxed));
+    eprintln!(
+        "Scanned {} PHP files in {:.2?}, found {} paths",
+        scanned.load(Ordering::Relaxed),
+        elapsed,
+        found.load(Ordering::Relaxed)
+    );
     let failed = failed.load(Ordering::Relaxed);
     if failed > 0 {
         eprintln!("Failed to read {failed} files");
@@ -262,14 +331,20 @@ fn find_components_command(root: &Path, output_file: Option<&Path>, type_dirs: b
             Err(code) => return code,
         };
         for (name, path) in &discovered.subsystems {
-            csv_writer.write_record(["subsystem", name, path.as_deref().unwrap_or("")]).ok();
+            csv_writer
+                .write_record(["subsystem", name, path.as_deref().unwrap_or("")])
+                .ok();
         }
         for (name, path) in &discovered.plugin_types {
             csv_writer.write_record(["plugintype", name, path]).ok();
         }
         csv_writer.flush().ok();
 
-        eprintln!("Found {} subsystems and {} plugin types", discovered.subsystems.len(), discovered.plugin_types.len());
+        eprintln!(
+            "Found {} subsystems and {} plugin types",
+            discovered.subsystems.len(),
+            discovered.plugin_types.len()
+        );
 
         return ExitCode::SUCCESS;
     }
@@ -280,7 +355,9 @@ fn find_components_command(root: &Path, output_file: Option<&Path>, type_dirs: b
     };
 
     for (component, path) in &discovered.components {
-        csv_writer.write_record([component.as_str(), path.as_str()]).ok();
+        csv_writer
+            .write_record([component.as_str(), path.as_str()])
+            .ok();
     }
     csv_writer.flush().ok();
 
@@ -289,7 +366,11 @@ fn find_components_command(root: &Path, output_file: Option<&Path>, type_dirs: b
     ExitCode::SUCCESS
 }
 
-fn find_entrypoints_command(root: &Path, output_file: Option<&Path>, bootstrap_only: bool) -> ExitCode {
+fn find_entrypoints_command(
+    root: &Path,
+    output_file: Option<&Path>,
+    bootstrap_only: bool,
+) -> ExitCode {
     if !root.is_dir() {
         eprintln!("error: {} is not a directory", root.display());
         return ExitCode::FAILURE;
@@ -340,17 +421,30 @@ fn find_entrypoints_command(root: &Path, output_file: Option<&Path>, bootstrap_o
         let record = vec![
             sanitize(&classification.file),
             classification.kind.to_string(),
-            classification.line.map(|line| line.to_string()).unwrap_or_default(),
+            classification
+                .line
+                .map(|line| line.to_string())
+                .unwrap_or_default(),
         ];
         csv_writer.write_record(record).ok();
     }
     csv_writer.flush().ok();
 
     let elapsed = start.elapsed();
-    let bootstrap_count = classifications.iter().filter(|c| c.kind == EntrypointKind::Bootstrap).count();
+    let bootstrap_count = classifications
+        .iter()
+        .filter(|c| c.kind == EntrypointKind::Bootstrap)
+        .count();
+    let entrypoint_count = classifications.len() - bootstrap_count;
     eprintln!(
-        "Scanned {scanned} PHP files in {elapsed:.2?}, found {} entry points and {bootstrap_count} bootstrap files",
-        classifications.len() - bootstrap_count
+        "{}",
+        format_summary(
+            scanned,
+            elapsed,
+            entrypoint_count,
+            bootstrap_count,
+            bootstrap_only
+        )
     );
     let failed = failed.load(Ordering::Relaxed);
     if failed > 0 {
@@ -358,4 +452,23 @@ fn find_entrypoints_command(root: &Path, output_file: Option<&Path>, bootstrap_o
     }
 
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_summary;
+    use std::time::Duration;
+
+    #[test]
+    fn bootstrap_only_summary_avoids_entry_point_language() {
+        let message = format_summary(12, Duration::from_secs(1), 0, 3, true);
+        assert!(message.contains("found 3 bootstrap files"));
+        assert!(!message.contains("entry point"));
+    }
+
+    #[test]
+    fn default_summary_mentions_entry_points_and_bootstrap_files() {
+        let message = format_summary(12, Duration::from_secs(1), 2, 3, false);
+        assert!(message.contains("found 2 entry points and 3 bootstrap files"));
+    }
 }

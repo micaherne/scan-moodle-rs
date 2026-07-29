@@ -150,7 +150,7 @@ pub fn classify(files: &[(String, Vec<PathResult>)], notation: &PathNotation, bo
         });
     }
 
-    classifications.sort_by(|a, b| a.file.cmp(&b.file));
+    classifications.sort_by(|a: &FileClassification, b| a.file.cmp(&b.file));
     classifications
 }
 
