@@ -90,10 +90,10 @@ pub struct FileClassification {
 pub fn classify(files: &[(String, Vec<PathResult>)], notation: &PathNotation, bootstrap_only: bool) -> Vec<FileClassification> {
     let mut forward = build_forward_edges(files);
 
-    let component_php = notation.to_repo_path("@/lib/classes/component.php");
-    let config_php_public = notation.to_repo_path("@/config.php");
-    let config_php_root = notation.to_repo_path("#/config.php");
-    let setup_php_root = notation.to_repo_path("#/lib/setup.php");
+    let component_php = dirroot_relative(notation, "lib/classes/component.php");
+    let config_php_public = dirroot_relative(notation, "config.php");
+    let config_php_root = "config.php".to_string();
+    let setup_php_root = "lib/setup.php".to_string();
 
     if !bootstrap_only {
         add_synthetic_config_chain(&mut forward, &config_php_public, &config_php_root, &setup_php_root);
@@ -152,6 +152,13 @@ pub fn classify(files: &[(String, Vec<PathResult>)], notation: &PathNotation, bo
 
     classifications.sort_by(|a: &FileClassification, b| a.file.cmp(&b.file));
     classifications
+}
+
+/// A repository-root-relative path (no leading slash) to `suffix` inside dirroot, computed
+/// directly from `notation`'s dirroot segment rather than through glyph notation — glyph ('@'/'#')
+/// is purely a human-facing rendering and must not be parsed back for program logic.
+fn dirroot_relative(notation: &PathNotation, suffix: &str) -> String {
+    format!("{}/{suffix}", notation.dirroot_segment()).trim_start_matches('/').to_string()
 }
 
 /// Neither hop below is discoverable by scanning: config.php never exists in a bare checkout (a
