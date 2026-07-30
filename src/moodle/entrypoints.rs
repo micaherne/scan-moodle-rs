@@ -45,6 +45,14 @@ use std::fmt;
 
 use crate::path_finder::{PathNotation, PathResult};
 
+/// The require/include graph in the direction it's actually executed: each file maps to the
+/// files it requires/includes, with the line of that require/include (`None` for the synthetic
+/// config.php hops added by [`add_synthetic_config_chain`], which correspond to no real line).
+type ForwardEdges = HashMap<String, Vec<(String, Option<u32>)>>;
+
+/// The require/include graph inverted: each file maps to the files that require/include it.
+type ReverseEdges = HashMap<String, Vec<String>>;
+
 /// The four constructs that actually execute their target at the point they appear — the only
 /// ones that can anchor a bootstrap or entry-point chain. A path merely mentioned elsewhere (an
 /// existence check, an error-message string, a test mocking a request path, an array of patterns
@@ -150,7 +158,7 @@ pub fn classify(files: &[(String, Vec<PathResult>)], notation: &PathNotation, bo
         });
     }
 
-    classifications.sort_by(|a: &FileClassification, b| a.file.cmp(&b.file));
+    classifications.sort_by(|a, b| a.file.cmp(&b.file));
     classifications
 }
 
@@ -169,7 +177,7 @@ fn dirroot_relative(notation: &PathNotation, suffix: &str) -> String {
 /// [`build_forward_edges`]). Both hops are fixed facts about Moodle's own bootstrap sequence
 /// rather than anything read from a specific file, so neither carries a line number.
 fn add_synthetic_config_chain(
-    forward: &mut HashMap<String, Vec<(String, Option<u32>)>>,
+    forward: &mut ForwardEdges,
     config_php_public: &str,
     config_php_root: &str,
     setup_php_root: &str,
@@ -182,8 +190,8 @@ fn add_synthetic_config_chain(
     forward.entry(config_php_root.to_string()).or_default().push((setup_php_root.to_string(), None));
 }
 
-fn build_forward_edges(files: &[(String, Vec<PathResult>)]) -> HashMap<String, Vec<(String, Option<u32>)>> {
-    let mut forward: HashMap<String, Vec<(String, Option<u32>)>> = HashMap::new();
+fn build_forward_edges(files: &[(String, Vec<PathResult>)]) -> ForwardEdges {
+    let mut forward: ForwardEdges = HashMap::new();
     for (file, results) in files {
         for result in results {
             if result.parent.as_deref().is_some_and(|parent| REQUIRE_LIKE.contains(&parent)) {
@@ -194,8 +202,8 @@ fn build_forward_edges(files: &[(String, Vec<PathResult>)]) -> HashMap<String, V
     forward
 }
 
-fn build_reverse_edges(forward: &HashMap<String, Vec<(String, Option<u32>)>>) -> HashMap<String, Vec<String>> {
-    let mut reverse: HashMap<String, Vec<String>> = HashMap::new();
+fn build_reverse_edges(forward: &ForwardEdges) -> ReverseEdges {
+    let mut reverse: ReverseEdges = HashMap::new();
     for (source, edges) in forward {
         for (target, _) in edges {
             reverse.entry(target.clone()).or_default().push(source.clone());
@@ -205,7 +213,7 @@ fn build_reverse_edges(forward: &HashMap<String, Vec<(String, Option<u32>)>>) ->
 }
 
 /// Every file that reaches one of `seeds` by requiring/including it, directly or transitively.
-fn reverse_closure(seeds: impl IntoIterator<Item = String>, reverse: &HashMap<String, Vec<String>>) -> HashSet<String> {
+fn reverse_closure(seeds: impl IntoIterator<Item = String>, reverse: &ReverseEdges) -> HashSet<String> {
     let mut closure: HashSet<String> = seeds.into_iter().collect();
     let mut queue: Vec<String> = closure.iter().cloned().collect();
     while let Some(target) = queue.pop() {
@@ -225,7 +233,7 @@ fn reverse_closure(seeds: impl IntoIterator<Item = String>, reverse: &HashMap<St
 /// all (not an entry point), or if nothing precedes it.
 fn pre_config_require_line(
     file: &str,
-    forward: &HashMap<String, Vec<(String, Option<u32>)>>,
+    forward: &ForwardEdges,
     config_seeds: &HashSet<String>,
 ) -> Option<u32> {
     let edges = forward.get(file)?;
@@ -237,7 +245,7 @@ fn pre_config_require_line(
 /// already in `closure` — i.e. where in this file the chain toward the bootstrap seed begins.
 /// `None` when every such edge is a synthetic config.php hop (no real line) or `file` is the seed
 /// itself (component.php does not require itself).
-fn anchor_line(file: &str, closure: &HashSet<String>, forward: &HashMap<String, Vec<(String, Option<u32>)>>) -> Option<u32> {
+fn anchor_line(file: &str, closure: &HashSet<String>, forward: &ForwardEdges) -> Option<u32> {
     forward.get(file)?.iter().filter(|(target, _)| closure.contains(target)).filter_map(|(_, line)| *line).min()
 }
 

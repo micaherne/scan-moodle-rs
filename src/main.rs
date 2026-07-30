@@ -98,6 +98,25 @@ fn create_csv_writer(
     Ok(csv_writer)
 }
 
+/// Discovers `root`'s components, or prints an error and returns the exit code to use if `root`
+/// isn't a directory or component discovery itself fails — the same two checks every command
+/// that scans a codebase needs before it can do anything else.
+fn discover_or_exit(root: &Path) -> Result<moodle::components::ComponentDiscovery, ExitCode> {
+    if !root.is_dir() {
+        eprintln!("error: {} is not a directory", root.display());
+        return Err(ExitCode::FAILURE);
+    }
+    discover_components(root).map_err(|err| {
+        eprintln!("error: failed to discover components: {err}");
+        ExitCode::FAILURE
+    })
+}
+
+/// `Some(value)` as its string form, `None` as an empty string.
+fn opt_to_string<T: ToString>(value: Option<T>) -> String {
+    value.map(|v| v.to_string()).unwrap_or_default()
+}
+
 /// `path`, relative to `root`, as a forward-slash-separated string.
 fn relative_unix_path(root: &Path, path: &Path) -> String {
     path.strip_prefix(root)
@@ -184,20 +203,12 @@ fn find_paths_command(
     output_file: Option<&Path>,
     resolve_components: bool,
 ) -> ExitCode {
-    if !root.is_dir() {
-        eprintln!("error: {} is not a directory", root.display());
-        return ExitCode::FAILURE;
-    }
+    let discovered = match discover_or_exit(root) {
+        Ok(discovered) => discovered,
+        Err(code) => return code,
+    };
 
     let notation = PathNotation::from_root(root);
-
-    let discovered = match discover_components(root) {
-        Ok(discovered) => discovered,
-        Err(err) => {
-            eprintln!("error: failed to discover components: {err}");
-            return ExitCode::FAILURE;
-        }
-    };
     let thirdparty_locations = thirdparty::find_thirdparty_locations(root, &discovered);
     let resolver = resolve_components.then(|| ComponentResolver::new(&discovered));
 
@@ -260,14 +271,8 @@ fn find_paths_command(
                 let mut record = vec![
                     sanitize(&relative),
                     result.line.to_string(),
-                    result
-                        .start_pos
-                        .map(|pos| pos.to_string())
-                        .unwrap_or_default(),
-                    result
-                        .end_pos
-                        .map(|pos| pos.to_string())
-                        .unwrap_or_default(),
+                    opt_to_string(result.start_pos),
+                    opt_to_string(result.end_pos),
                     sanitize(&result.code),
                     result.kind.to_string(),
                     sanitize(&result.path),
@@ -312,17 +317,9 @@ fn find_paths_command(
 }
 
 fn find_components_command(root: &Path, output_file: Option<&Path>, type_dirs: bool) -> ExitCode {
-    if !root.is_dir() {
-        eprintln!("error: {} is not a directory", root.display());
-        return ExitCode::FAILURE;
-    }
-
-    let discovered = match discover_components(root) {
+    let discovered = match discover_or_exit(root) {
         Ok(discovered) => discovered,
-        Err(err) => {
-            eprintln!("error: failed to read components: {err}");
-            return ExitCode::FAILURE;
-        }
+        Err(code) => return code,
     };
 
     if type_dirs {
@@ -371,20 +368,12 @@ fn find_entrypoints_command(
     output_file: Option<&Path>,
     bootstrap_only: bool,
 ) -> ExitCode {
-    if !root.is_dir() {
-        eprintln!("error: {} is not a directory", root.display());
-        return ExitCode::FAILURE;
-    }
+    let discovered = match discover_or_exit(root) {
+        Ok(discovered) => discovered,
+        Err(code) => return code,
+    };
 
     let notation = PathNotation::from_root(root);
-
-    let discovered = match discover_components(root) {
-        Ok(discovered) => discovered,
-        Err(err) => {
-            eprintln!("error: failed to discover components: {err}");
-            return ExitCode::FAILURE;
-        }
-    };
     let thirdparty_locations = thirdparty::find_thirdparty_locations(root, &discovered);
 
     let failed = AtomicUsize::new(0);
@@ -421,10 +410,7 @@ fn find_entrypoints_command(
         let record = vec![
             sanitize(&classification.file),
             classification.kind.to_string(),
-            classification
-                .line
-                .map(|line| line.to_string())
-                .unwrap_or_default(),
+            opt_to_string(classification.line),
         ];
         csv_writer.write_record(record).ok();
     }

@@ -146,39 +146,19 @@ impl<'ast, 'arena, 'ctx> Walker<'ast, 'arena, Context<'ctx>> for PathFindingWalk
     }
 
     fn walk_include_construct(&self, construct: &'ast IncludeConstruct<'arena>, context: &mut Context<'ctx>) {
-        if let Some(result) = build_require_literal_result(construct.value, Some("include".to_string()), context) {
-            context.paths.push(result);
-            return;
-        }
-        context.pending_parent = Some("include".to_string());
-        self.walk_expression(construct.value, context);
+        self.walk_require_like_construct(construct.value, "include", context);
     }
 
     fn walk_include_once_construct(&self, construct: &'ast IncludeOnceConstruct<'arena>, context: &mut Context<'ctx>) {
-        if let Some(result) = build_require_literal_result(construct.value, Some("include_once".to_string()), context) {
-            context.paths.push(result);
-            return;
-        }
-        context.pending_parent = Some("include_once".to_string());
-        self.walk_expression(construct.value, context);
+        self.walk_require_like_construct(construct.value, "include_once", context);
     }
 
     fn walk_require_construct(&self, construct: &'ast RequireConstruct<'arena>, context: &mut Context<'ctx>) {
-        if let Some(result) = build_require_literal_result(construct.value, Some("require".to_string()), context) {
-            context.paths.push(result);
-            return;
-        }
-        context.pending_parent = Some("require".to_string());
-        self.walk_expression(construct.value, context);
+        self.walk_require_like_construct(construct.value, "require", context);
     }
 
     fn walk_require_once_construct(&self, construct: &'ast RequireOnceConstruct<'arena>, context: &mut Context<'ctx>) {
-        if let Some(result) = build_require_literal_result(construct.value, Some("require_once".to_string()), context) {
-            context.paths.push(result);
-            return;
-        }
-        context.pending_parent = Some("require_once".to_string());
-        self.walk_expression(construct.value, context);
+        self.walk_require_like_construct(construct.value, "require_once", context);
     }
 
     fn walk_function_call(&self, call: &'ast FunctionCall<'arena>, context: &mut Context<'ctx>) {
@@ -208,6 +188,25 @@ impl<'ast, 'arena, 'ctx> Walker<'ast, 'arena, Context<'ctx>> for PathFindingWalk
             context.pending_parent = name.clone();
             self.walk_expression(argument.value(), context);
         }
+    }
+}
+
+impl PathFindingWalker {
+    /// Shared body of the four `walk_*_construct` methods above: include/include_once/require/
+    /// require_once all behave identically, tagging the construct's single value expression with
+    /// their own name as `parent`.
+    fn walk_require_like_construct<'ast, 'arena, 'ctx>(
+        &self,
+        value: &'ast Expression<'arena>,
+        tag: &str,
+        context: &mut Context<'ctx>,
+    ) {
+        if let Some(result) = build_require_literal_result(value, Some(tag.to_string()), context) {
+            context.paths.push(result);
+            return;
+        }
+        context.pending_parent = Some(tag.to_string());
+        self.walk_expression(value, context);
     }
 }
 
