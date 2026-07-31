@@ -217,9 +217,11 @@ fn find_paths_command(
 
     let notation = PathNotation::from_root(root);
     let thirdparty_locations = thirdparty::find_thirdparty_locations(root, &discovered);
+    let dirroot = moodle::dirroot_prefix(root).trim_end_matches('/');
 
     // --categorise needs source_component/target_component to decide same-vs-different-component
-    // and directory/dynamic-component categories, so it implies --resolve-components' columns.
+    // and dynamic-component/dirroot-wrangling/root-wrangling categories, so it implies
+    // --resolve-components' columns.
     let resolve_components = resolve_components || categorise;
     let resolver = resolve_components.then(|| ComponentResolver::new(&discovered));
 
@@ -269,7 +271,7 @@ fn find_paths_command(
         "code",
         "kind",
         "glyph_path",
-        "real_path",
+        "normalised_path",
     ];
     if resolve_components {
         header.extend(["source_component", "target_component", "path_in_component"]);
@@ -328,6 +330,7 @@ fn find_paths_command(
                         file_boundary_line,
                         source_component.as_deref(),
                         target.as_ref(),
+                        dirroot,
                     );
                     record.push(category.to_string());
                 }

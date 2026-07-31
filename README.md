@@ -30,13 +30,15 @@ scan-moodle find-paths <ROOT> [OPTIONS]
 | `--resolve-components` | Add `source_component`, `target_component` and `path_in_component` columns |
 | `--categorise` | Add a `category` column classifying each reference by how it relates to Moodle's bootstrap sequence and component system (implies `--resolve-components`' columns) |
 
-Output columns: `file`, `line`, `start`, `end`, `code`, `kind`, `glyph_path`, `real_path`.
+Output columns: `file`, `line`, `start`, `end`, `code`, `kind`, `glyph_path`, `normalised_path`.
 
 `--categorise` classifies each reference into one of: `config` (targets config.php itself),
-`pre-component` (in a bootstrap file, before core\component is loaded), `directory` (resolves to a
-bare directory), `dynamic-component` (resolves to a component with a variable name),
-`static-same-component` / `static-different-component` (resolves to a literal file), `variable-only`
-(doesn't resolve, but is shaped like a path with a variable in it), or `uncategorised`.
+`pre-component` (in a bootstrap file, before core\component is loaded), `dynamic-component`
+(resolves to a component with a variable name), `dirroot-wrangling` / `root-wrangling` (is exactly
+`$CFG->dirroot` / `$CFG->root` itself, with or without a trailing separator),
+`static-same-component` / `static-different-component` (resolves to a literal file or directory),
+`variable-only` (doesn't resolve, but is shaped like a path with a variable in it), or
+`uncategorised`.
 
 ### `find-components`
 

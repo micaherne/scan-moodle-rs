@@ -180,28 +180,32 @@ fn remainder(path: &str, ends: &[usize], consumed: usize) -> String {
 /// including a plugin type's own root such as 'public/mod' — is therefore always outside every
 /// component too: that directory belongs to Moodle core's own layout, not to any one plugin.
 ///
-/// What remains is only the concern that the path may not mean what it literally says. Everything
-/// the scanner could not evaluate is rendered as a '{...}' marker that could stand for any text at
-/// all, including whole directory levels; a '..' is what is left of a path that climbed above the
-/// repository root, so the rest of it describes somewhere else entirely; and a backslash is either
-/// a Windows separator or a namespace, both of which hide segment boundaries from the '/' split
-/// this walk relies on. None of these can be read as a plain location, so each is refused, along
-/// with anything else outside the characters that make up ordinary file names — with one
-/// exception: a '{...}' placeholder that is the *last* segment, with at least one plain segment
-/// before it, is still fine. Having nothing after it, it can only ever be a leaf name, so whatever
-/// it stands for cannot retroactively turn the already-established, purely literal directory above
-/// it (e.g. 'public/install/lang', for "public/install/lang/{$options['lang']}") into a component
-/// boundary. A *lone* placeholder with no such literal context (e.g. 'public/{$path}', right where
-/// a component could start) is not covered by this and stays refused — it alone could stand for an
-/// entire real sub-path.
+/// What remains is only the concern that `unmatched`'s *first* segment specifically might not mean
+/// what it literally says. That first segment is the one the trie walk actually tried and failed
+/// to match; if it is a '{...}' marker rather than a plain name (e.g. 'public/{$path}', right where
+/// a component could start), its real value might have matched something after all, so it stays
+/// refused. Everything after that first segment, though, was never looked up against anything —
+/// the walk had already given up by then — so nothing there, marker or not, can turn that
+/// already-failed first segment into a real subdirectory in hindsight. A '{...}' marker anywhere
+/// past the first segment is therefore fine, whether it fills a whole segment on its own (e.g.
+/// "public/install/lang/{$options['lang']}") or is fused with literal text, as a variable
+/// interpolated straight into a filename is (e.g. "public/lang/en/{$file}.php", for
+/// `"$CFG->dirroot/lang/en/$file.php"`, or "public/backup/converter/{$name}/lib.php" further still)
+/// — it is just an unknown value sitting inside a directory that is already known, from the plain
+/// segments around it, to belong to no component. What is refused wherever it appears, first
+/// segment or not, is anything that is neither a plain literal name nor a '{...}' marker: a '..'
+/// segment (the path escapes the repository root, so the rest of it describes somewhere else
+/// entirely), a backslash (a Windows separator or a namespace, either way not a `/`-delimited path
+/// this scheme can reason about), or anything else outside the characters that make up ordinary
+/// file names, such as a glob or a URL query string that snuck in as if it were a path.
 fn is_certainly_outside_every_component(unmatched: &[&str]) -> bool {
-    let Some((last, rest)) = unmatched.split_last() else {
+    let Some((first, rest)) = unmatched.split_first() else {
         return true;
     };
-    if !rest.iter().all(|segment| is_plain_segment(segment)) {
+    if !is_plain_segment(first) {
         return false;
     }
-    is_plain_segment(last) || (!rest.is_empty() && is_whole_dynamic_segment(last))
+    rest.iter().all(|segment| is_plain_segment(segment) || segment.contains('{'))
 }
 
 /// Whether `segment` is an ordinary, literal file or directory name.
@@ -373,14 +377,18 @@ mod tests {
         assert_eq!(resolve(&resolver, "public/lib/tcpdf/"), Some(("core".to_string(), "/tcpdf/".to_string())));
     }
 
-    /// The paths that must never resolve at all: anything that is not a plain literal location.
+    /// The paths that must never resolve at all: the *first* segment the trie walk failed to
+    /// match is the one place a '{...}' marker is genuinely ambiguous (its real value might have
+    /// matched something), and a few shapes that are not a plain literal location at all.
     #[test]
     fn uncertain_paths_do_not_resolve_to_root() {
         let resolver = root_resolver();
         let cases = [
-            // An expression the scanner could not evaluate; it could expand to anything.
+            // A marker right where the trie walk gave up — its real value could have matched a
+            // known child, so it stays refused. Contrast with a marker further down the path
+            // (see `a_marker_past_the_first_unmatched_segment_still_resolves_to_root`), which is
+            // fine, since nothing downstream of a failed match ever gets looked up at all.
             "public/{$path}",
-            "public/lang/{$lang}/x.php",
             "public{$dirpath}",
             // A path that climbed above the repository root, so it describes somewhere else.
             "../etc/passwd",
@@ -395,6 +403,20 @@ mod tests {
         ];
         for path in cases {
             assert_eq!(resolve(&resolver, path), None, "expected {path} not to resolve");
+        }
+    }
+
+    /// A '{...}' marker anywhere *past* the first segment the trie walk failed to match is fine,
+    /// however many literal segments separate it from that failure point — nothing after a failed
+    /// match is ever looked up, so a marker there can't retroactively change what the already-
+    /// established literal directory above it resolves to. `lang` alone (immediately after the
+    /// failure) and `backup/converter` (two literal segments deep) both demonstrate this the same
+    /// way.
+    #[test]
+    fn a_marker_past_the_first_unmatched_segment_still_resolves_to_root() {
+        let resolver = root_resolver();
+        for path in ["public/lang/{$lang}/x.php", "public/backup/converter/{$name}/lib.php"] {
+            assert_eq!(resolve(&resolver, path), Some(("root".to_string(), format!("/{path}"))), "for {path}");
         }
     }
 
@@ -429,6 +451,17 @@ mod tests {
     fn trailing_placeholder_with_literal_context_resolves_to_root() {
         let resolver = root_resolver();
         let path = "public/install/lang/{$options['lang']}";
+        assert_eq!(resolve(&resolver, path), Some(("root".to_string(), format!("/{path}"))));
+    }
+
+    /// The same reasoning applies when the placeholder is fused with literal text rather than
+    /// filling the whole last segment — a variable interpolated straight into a filename, as in
+    /// `"$CFG->dirroot/lang/en/$file.php"`. There is still nothing after it, so it is still just an
+    /// unknown leaf name under the already-established 'lang/en' directory.
+    #[test]
+    fn trailing_placeholder_fused_with_literal_text_resolves_to_root() {
+        let resolver = root_resolver();
+        let path = "public/lang/en/{$file}.php";
         assert_eq!(resolve(&resolver, path), Some(("root".to_string(), format!("/{path}"))));
     }
 
