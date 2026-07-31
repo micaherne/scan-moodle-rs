@@ -93,6 +93,15 @@ pub struct FileClassification {
     pub line: Option<u32>,
 }
 
+/// The repository-root-relative paths a real Moodle checkout's config.php can live at (the
+/// `public/config.php` forwarding copy on a post-5.1 layout, and the root `config.php` a user or
+/// the installer creates) — neither exists in a bare checkout, so neither is ever discovered by
+/// scanning it. Used both to seed the entry-point search in [`classify`] and, standalone, by
+/// [`crate::moodle::categorise`] to recognise a reference that targets config.php itself.
+pub fn config_locations(notation: &PathNotation) -> HashSet<String> {
+    HashSet::from([dirroot_relative(notation, "config.php"), "config.php".to_string()])
+}
+
 /// Classifies every file in `files` — the codebase-wide output of [`crate::path_finder::find_paths`],
 /// as `(file, that file's results)` pairs — as an entry point or a bootstrap file.
 pub fn classify(files: &[(String, Vec<PathResult>)], notation: &PathNotation, bootstrap_only: bool) -> Vec<FileClassification> {
@@ -112,7 +121,7 @@ pub fn classify(files: &[(String, Vec<PathResult>)], notation: &PathNotation, bo
     // config.php itself is not an entry point — it is what entry points require — so the seeds
     // are excluded from the reported set; only files reverse-reachable *from* them (i.e. that
     // actually require one of them, directly or transitively) count.
-    let config_seeds = HashSet::from([config_php_public, config_php_root]);
+    let config_seeds = config_locations(notation);
     let entrypoints: HashSet<String> =
         reverse_closure(config_seeds.iter().cloned(), &reverse).into_iter().filter(|file| !config_seeds.contains(file)).collect();
     let bootstrap = reverse_closure([component_php], &reverse);

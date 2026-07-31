@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -13,6 +13,7 @@ use rayon::prelude::*;
 use walkdir::WalkDir;
 
 use scan_moodle::moodle;
+use scan_moodle::moodle::categorise;
 use scan_moodle::moodle::components::discover_components;
 use scan_moodle::moodle::entrypoints::{self, EntrypointKind};
 use scan_moodle::moodle::resolver::ComponentResolver;
@@ -42,6 +43,10 @@ enum Commands {
         /// components
         #[arg(long = "resolve-components")]
         resolve_components: bool,
+        /// Add a category column classifying each reference by how it relates to Moodle's
+        /// bootstrap sequence and component system (implies --resolve-components' columns)
+        #[arg(long = "categorise")]
+        categorise: bool,
     },
     /// List all components (core, subsystems, plugins and subplugins) in a Moodle codebase
     FindComponents {
@@ -161,7 +166,8 @@ fn main() -> ExitCode {
             root,
             output_file,
             resolve_components,
-        } => find_paths_command(&root, output_file.as_deref(), resolve_components),
+            categorise,
+        } => find_paths_command(&root, output_file.as_deref(), resolve_components, categorise),
         Commands::FindComponents {
             root,
             output_file,
@@ -202,6 +208,7 @@ fn find_paths_command(
     root: &Path,
     output_file: Option<&Path>,
     resolve_components: bool,
+    categorise: bool,
 ) -> ExitCode {
     let discovered = match discover_or_exit(root) {
         Ok(discovered) => discovered,
@@ -210,12 +217,49 @@ fn find_paths_command(
 
     let notation = PathNotation::from_root(root);
     let thirdparty_locations = thirdparty::find_thirdparty_locations(root, &discovered);
+
+    // --categorise needs source_component/target_component to decide same-vs-different-component
+    // and directory/dynamic-component categories, so it implies --resolve-components' columns.
+    let resolve_components = resolve_components || categorise;
     let resolver = resolve_components.then(|| ComponentResolver::new(&discovered));
 
-    let scanned = AtomicUsize::new(0);
     let failed = AtomicUsize::new(0);
-    let found = AtomicUsize::new(0);
     let start = Instant::now();
+
+    // Every file's results are collected up front, rather than streamed straight to output as
+    // find-paths alone does not need to: --categorise needs the whole codebase's require/include
+    // graph before it can categorise even a single reference (see entrypoints::classify), the same
+    // reason find-entrypoints does this.
+    let files: Vec<(String, Vec<PathResult>)> = php_paths(root, &thirdparty_locations)
+        .filter_map(|path| {
+            let relative = relative_unix_path(root, &path);
+            let bytes = match std::fs::read(&path) {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    eprintln!("warning: failed to read {}: {err}", path.display());
+                    failed.fetch_add(1, Ordering::Relaxed);
+                    return None;
+                }
+            };
+            let source = String::from_utf8_lossy(&bytes);
+            let results = find_paths(&source, &relative, &notation);
+            Some((relative, results))
+        })
+        .collect();
+
+    let scanned = files.len();
+    let found: usize = files.iter().map(|(_, results)| results.len()).sum();
+
+    // The small set of bootstrap files, and the line within each before which it has no possible
+    // access to core\component yet (see entrypoints::classify's `bootstrap_only` mode) — the input
+    // categorise::categorise needs for its PreComponent category.
+    let config_locations = categorise.then(|| entrypoints::config_locations(&notation));
+    let boundary_lines: Option<HashMap<String, u32>> = categorise.then(|| {
+        entrypoints::classify(&files, &notation, true)
+            .into_iter()
+            .filter_map(|classification| classification.line.map(|line| (classification.file, line)))
+            .collect()
+    });
 
     let mut header = vec![
         "file",
@@ -230,6 +274,9 @@ fn find_paths_command(
     if resolve_components {
         header.extend(["source_component", "target_component", "path_in_component"]);
     }
+    if categorise {
+        header.push("category");
+    }
     let csv_writer = match create_csv_writer(output_file, &header) {
         Ok(writer) => writer,
         Err(code) => return code,
@@ -237,39 +284,24 @@ fn find_paths_command(
 
     let out = Mutex::new(csv_writer);
 
-    php_paths(root, &thirdparty_locations).for_each(|path| {
-        scanned.fetch_add(1, Ordering::Relaxed);
-        let relative = relative_unix_path(root, &path);
-        let bytes = match std::fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(err) => {
-                eprintln!("warning: failed to read {}: {err}", path.display());
-                failed.fetch_add(1, Ordering::Relaxed);
-                return;
-            }
-        };
-        let source = String::from_utf8_lossy(&bytes);
-        let results = find_paths(&source, &relative, &notation);
+    files.par_iter().for_each(|(relative, results)| {
         if results.is_empty() {
             return;
         }
 
-        found.fetch_add(results.len(), Ordering::Relaxed);
         // The source file is a real path on disk, so it always has a well-defined component
         // (if any) and no meaningful sub-path within it.
-        let source_component = resolver
-            .as_ref()
-            .and_then(|resolver| resolver.resolve(&relative))
-            .map(|r| r.component);
+        let source_component = resolver.as_ref().and_then(|resolver| resolver.resolve(relative)).map(|r| r.component);
+        let file_boundary_line = boundary_lines.as_ref().and_then(|lines| lines.get(relative).copied());
 
         // Build every record up front so only the actual write is serialized on `out`;
-        // sanitizing and resolving components are pure computation and should run fully in
-        // parallel across the rayon worker threads.
+        // sanitizing, resolving components and categorising are pure computation and should run
+        // fully in parallel across the rayon worker threads.
         let records: Vec<Vec<String>> = results
             .iter()
             .map(|result| {
                 let mut record = vec![
-                    sanitize(&relative),
+                    sanitize(relative),
                     result.line.to_string(),
                     opt_to_string(result.start_pos),
                     opt_to_string(result.end_pos),
@@ -278,8 +310,8 @@ fn find_paths_command(
                     sanitize(&result.path),
                     sanitize(&result.real_path),
                 ];
-                if let Some(resolver) = &resolver {
-                    let target = resolver.resolve(&result.real_path);
+                let target = resolver.as_ref().and_then(|resolver| resolver.resolve(&result.real_path));
+                if resolve_components {
                     record.push(source_component.clone().unwrap_or_default());
                     record.push(
                         target
@@ -287,7 +319,17 @@ fn find_paths_command(
                             .map(|r| r.component.clone())
                             .unwrap_or_default(),
                     );
-                    record.push(target.map(|r| r.path_in_component).unwrap_or_default());
+                    record.push(target.as_ref().map(|r| r.path_in_component.clone()).unwrap_or_default());
+                }
+                if categorise {
+                    let category = categorise::categorise(
+                        result,
+                        config_locations.as_ref().expect("categorise implies config_locations is set"),
+                        file_boundary_line,
+                        source_component.as_deref(),
+                        target.as_ref(),
+                    );
+                    record.push(category.to_string());
                 }
                 record
             })
@@ -302,12 +344,7 @@ fn find_paths_command(
     out.into_inner().unwrap().flush().ok();
     let elapsed = start.elapsed();
 
-    eprintln!(
-        "Scanned {} PHP files in {:.2?}, found {} paths",
-        scanned.load(Ordering::Relaxed),
-        elapsed,
-        found.load(Ordering::Relaxed)
-    );
+    eprintln!("Scanned {scanned} PHP files in {elapsed:.2?}, found {found} paths");
     let failed = failed.load(Ordering::Relaxed);
     if failed > 0 {
         eprintln!("Failed to read {failed} files");

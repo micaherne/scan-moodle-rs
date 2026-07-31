@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+pub mod categorise;
 pub mod components;
 pub mod entrypoints;
 pub mod resolver;
