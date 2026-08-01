@@ -105,22 +105,35 @@ pub fn categorise(
         Some(resolution) if resolution.component == ROOT_COMPONENT && is_root_wrangling(&result.real_path) => PathCategory::RootWrangling,
         Some(resolution) if source_component == Some(resolution.component.as_str()) => PathCategory::StaticSameComponent,
         Some(_) => PathCategory::StaticDifferentComponent,
+        // The resolver refuses to resolve anything with a backslash in it — rightly, since a
+        // backslash is generally a Windows separator or a namespace, not something it can
+        // interpret as a `/`-delimited path. But code that is explicitly checking for a
+        // Windows-style path (e.g. `strpos($filepath, $CFG->dirroot.'\\')`, see
+        // `enrol/flatfile/lib.php`) legitimately means dirroot/root plus a literal trailing
+        // separator, exactly like the ordinary `/` case above, just spelled with the other
+        // separator — so it is recognised here specifically for wrangling, without loosening how
+        // the resolver treats backslashes anywhere else.
+        None if is_dirroot_wrangling(&result.real_path, dirroot) => PathCategory::DirrootWrangling,
+        None if is_root_wrangling(&result.real_path) => PathCategory::RootWrangling,
         None if is_variable_shaped(&result.real_path) => PathCategory::VariableOnly,
         None => PathCategory::Uncategorised,
     }
 }
 
 /// Whether `real_path` is exactly `dirroot` itself, or that same location with a single trailing
-/// separator appended by how it was concatenated (e.g. `$CFG->dirroot . '/'`).
+/// separator appended by how it was concatenated (e.g. `$CFG->dirroot . '/'` or, for code
+/// explicitly checking a Windows-style path, `$CFG->dirroot . '\\'`).
 fn is_dirroot_wrangling(real_path: &str, dirroot: &str) -> bool {
-    real_path == dirroot || real_path == format!("{dirroot}/")
+    real_path == dirroot || real_path == format!("{dirroot}/") || real_path == format!("{dirroot}\\")
 }
 
 /// Whether `real_path` is exactly `$CFG->root` itself, or that same location with a trailing
 /// separator. Checked as "every segment is empty" rather than against a single fixed string, so
-/// it catches a trailing separator regardless of exactly how the scanner happens to render it.
+/// it catches a trailing '/' regardless of exactly how the scanner happens to render it; a
+/// trailing backslash is checked separately, since backslash is not a segment separator anywhere
+/// else in this scheme (see the `None` arms in `categorise`).
 fn is_root_wrangling(real_path: &str) -> bool {
-    real_path.split('/').all(str::is_empty)
+    real_path.split('/').all(str::is_empty) || real_path == "\\"
 }
 
 /// Whether `real_path` looks like a real path that simply has one or more runtime-only segments,
@@ -227,6 +240,19 @@ mod tests {
         assert_eq!(category, PathCategory::DirrootWrangling);
     }
 
+    /// `strpos($filepath, $CFG->dirroot.'\\') === 0` (`enrol/flatfile/lib.php`) is code explicitly
+    /// checking a Windows-style path, so the trailing backslash means the same thing a trailing
+    /// '/' would. The resolver refuses to resolve anything containing a backslash at all — rightly
+    /// so everywhere else, since a backslash usually means something other than a path separator —
+    /// so this never reaches `categorise` as a resolved target; it has to be recognised straight
+    /// off the unresolved `real_path` instead.
+    #[test]
+    fn dirroot_with_a_trailing_backslash_is_also_dirroot_wrangling() {
+        let locations = HashSet::new();
+        let category = categorise(&result("public\\", 10), &locations, None, Some("enrol_flatfile"), None, DIRROOT);
+        assert_eq!(category, PathCategory::DirrootWrangling);
+    }
+
     #[test]
     fn bare_root_itself_is_root_wrangling() {
         let locations = HashSet::new();
@@ -243,6 +269,16 @@ mod tests {
         let locations = HashSet::new();
         let target = resolution("root", "/");
         let category = categorise(&result("/", 10), &locations, None, Some("tool_xmldb"), Some(&target), DIRROOT);
+        assert_eq!(category, PathCategory::RootWrangling);
+    }
+
+    /// The same Windows-style-path reasoning as
+    /// `dirroot_with_a_trailing_backslash_is_also_dirroot_wrangling`, for `$CFG->root` instead of
+    /// `$CFG->dirroot`.
+    #[test]
+    fn root_with_a_trailing_backslash_is_also_root_wrangling() {
+        let locations = HashSet::new();
+        let category = categorise(&result("\\", 10), &locations, None, Some("tool_xmldb"), None, DIRROOT);
         assert_eq!(category, PathCategory::RootWrangling);
     }
 
