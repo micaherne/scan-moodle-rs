@@ -15,9 +15,11 @@ use crate::path_finder::PathResult;
 /// One path reference's category, most-specific rule first: a reference can only be `Config` if
 /// it targets config.php outright, and can only be `PreComponent` if it runs before the
 /// containing file's own boundary line — either check settles the category regardless of what
-/// the reference's target itself resolves to. Past those, `DynamicComponent`, `DirrootWrangling`
-/// and `RootWrangling` are specific shapes checked ahead of the plain same/different-component
-/// fallback that everything else resolved lands in.
+/// the reference's target itself resolves to. `PluginTypeRoot` is checked next, ahead of
+/// everything resolution-based, since it too is a plain string match against a fixed, known set of
+/// locations. Past those, `DynamicComponent`, `DirrootWrangling` and `RootWrangling` are specific
+/// shapes checked ahead of the plain same/different-component fallback that everything else
+/// resolved lands in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathCategory {
     /// Targets config.php itself (root or `public/`) — see
@@ -27,16 +29,21 @@ pub enum PathCategory {
     /// `bootstrap_only: true`), before that file's own boundary line — real file-loading work
     /// done with no possible access to `core\component` yet, regardless of what it leads to.
     PreComponent,
+    /// The reference is exactly a plugin type's own root directory — the directory that holds
+    /// every plugin of that type (e.g. `mod/`, `theme/`), which code referencing it directly is
+    /// very likely scanning to enumerate installed plugins. This is a different thing entirely
+    /// from an individual plugin's own directory (e.g. `mod/forum/`), which is not this category —
+    /// that already resolves to that plugin's own component and is `StaticSameComponent` or
+    /// `StaticDifferentComponent` like any other reference to a known component.
+    PluginTypeRoot,
     /// Resolved to a component synthesised from a dynamic plugin-name segment (e.g.
     /// `mod_{$modname}`) rather than a literal one — regardless of whether the reference goes on
     /// to name a file inside that plugin or is the bare plugin directory itself.
     DynamicComponent,
     /// The reference is exactly `$CFG->dirroot` itself, or that plus a single trailing separator
     /// appended by how it was concatenated (e.g. `$CFG->dirroot . '/'`) — nothing else
-    /// concatenated on. A plugin-type root such as `$CFG->dirroot . '/mod'` is not this: there is
-    /// real content after dirroot in the reference, so it falls through to
-    /// [`Self::StaticSameComponent`] or [`Self::StaticDifferentComponent`] like any other
-    /// reference that happens to resolve to the `root` pseudo-component.
+    /// concatenated on. `$CFG->dirroot . '/mod'` is not this: there is real content after dirroot
+    /// in the reference (it is `PluginTypeRoot` instead, checked earlier).
     DirrootWrangling,
     /// The same idea as [`Self::DirrootWrangling`], for `$CFG->root` itself.
     RootWrangling,
@@ -60,6 +67,7 @@ impl fmt::Display for PathCategory {
         f.write_str(match self {
             Self::Config => "config",
             Self::PreComponent => "pre-component",
+            Self::PluginTypeRoot => "plugin-type-root",
             Self::DynamicComponent => "dynamic-component",
             Self::DirrootWrangling => "dirroot-wrangling",
             Self::RootWrangling => "root-wrangling",
@@ -77,9 +85,11 @@ impl fmt::Display for PathCategory {
 /// is the line for the file containing `result`, taken from
 /// [`crate::moodle::entrypoints::classify`] called with `bootstrap_only: true` — `None` if that
 /// file isn't in that list at all (true of most files: ordinary application code with no real,
-/// traceable require chain into component.php). `source_component` is the component owning the
-/// containing file itself; `target` is the containing file's own resolution of
-/// `result.real_path`, both via [`crate::moodle::resolver::ComponentResolver`]. `dirroot` is
+/// traceable require chain into component.php). `plugin_type_roots` is every plugin type's own
+/// root directory, repository-relative (e.g. 'public/mod', 'public/theme') — the values of
+/// [`crate::moodle::components::ComponentDiscovery::plugin_types`]. `source_component` is the
+/// component owning the containing file itself; `target` is the containing file's own resolution
+/// of `result.real_path`, both via [`crate::moodle::resolver::ComponentResolver`]. `dirroot` is
 /// dirroot's own path relative to the repository root, with no leading or trailing slash (e.g.
 /// 'public', or '' pre-Moodle-5.1 where dirroot and the repository root coincide) — see
 /// [`crate::moodle::dirroot_prefix`]; used only to recognise dirroot-wrangling by shape.
@@ -87,6 +97,7 @@ pub fn categorise(
     result: &PathResult,
     config_locations: &HashSet<String>,
     file_boundary_line: Option<u32>,
+    plugin_type_roots: &HashSet<String>,
     source_component: Option<&str>,
     target: Option<&Resolution>,
     dirroot: &str,
@@ -96,6 +107,9 @@ pub fn categorise(
     }
     if file_boundary_line.is_some_and(|boundary_line| result.line < boundary_line) {
         return PathCategory::PreComponent;
+    }
+    if is_plugin_type_root(&result.real_path, plugin_type_roots) {
+        return PathCategory::PluginTypeRoot;
     }
     match target {
         Some(resolution) if resolution.component.contains('{') => PathCategory::DynamicComponent,
@@ -118,6 +132,15 @@ pub fn categorise(
         None if is_variable_shaped(&result.real_path) => PathCategory::VariableOnly,
         None => PathCategory::Uncategorised,
     }
+}
+
+/// Whether `real_path` is exactly one of `plugin_type_roots`, or one of them with a single
+/// trailing '/' appended by how it was concatenated (e.g. `$CFG->dirroot . '/mod/'`) — mirroring
+/// the same tolerance [`is_dirroot_wrangling`] and [`is_root_wrangling`] give their own single
+/// fixed location.
+fn is_plugin_type_root(real_path: &str, plugin_type_roots: &HashSet<String>) -> bool {
+    plugin_type_roots.contains(real_path)
+        || real_path.strip_suffix('/').is_some_and(|stripped| plugin_type_roots.contains(stripped))
 }
 
 /// Whether `real_path` is exactly `dirroot` itself, or that same location with a single trailing
@@ -177,7 +200,7 @@ mod tests {
     #[test]
     fn targeting_config_php_is_config_regardless_of_anything_else() {
         let locations = HashSet::from(["public/config.php".to_string()]);
-        let category = categorise(&result("public/config.php", 999), &locations, Some(1), Some("core"), None, DIRROOT);
+        let category = categorise(&result("public/config.php", 999), &locations, Some(1), &HashSet::new(), Some("core"), None, DIRROOT);
         assert_eq!(category, PathCategory::Config);
     }
 
@@ -186,7 +209,7 @@ mod tests {
         let locations = HashSet::new();
         let target = resolution("core", "/setup.php");
         let category =
-            categorise(&result("public/lib/setup.php", 30), &locations, Some(122), Some("tool_behat"), Some(&target), DIRROOT);
+            categorise(&result("public/lib/setup.php", 30), &locations, Some(122), &HashSet::new(), Some("tool_behat"), Some(&target), DIRROOT);
         assert_eq!(category, PathCategory::PreComponent);
     }
 
@@ -195,7 +218,7 @@ mod tests {
         let locations = HashSet::new();
         let target = resolution("core", "/setup.php");
         let category =
-            categorise(&result("public/lib/setup.php", 200), &locations, Some(122), Some("tool_behat"), Some(&target), DIRROOT);
+            categorise(&result("public/lib/setup.php", 200), &locations, Some(122), &HashSet::new(), Some("tool_behat"), Some(&target), DIRROOT);
         assert_eq!(category, PathCategory::StaticDifferentComponent);
     }
 
@@ -211,7 +234,7 @@ mod tests {
     fn a_dynamic_plugin_name_at_its_own_bare_root_is_dynamic_component() {
         let locations = HashSet::new();
         let target = resolution("mod_{$modname}", "");
-        let category = categorise(&result("public/mod/{$modname}", 10), &locations, None, Some("root"), Some(&target), DIRROOT);
+        let category = categorise(&result("public/mod/{$modname}", 10), &locations, None, &HashSet::new(), Some("root"), Some(&target), DIRROOT);
         assert_eq!(category, PathCategory::DynamicComponent);
     }
 
@@ -220,7 +243,7 @@ mod tests {
         let locations = HashSet::new();
         let target = resolution("mod_{$modname}", "/lib.php");
         let category =
-            categorise(&result("public/mod/{$modname}/lib.php", 10), &locations, None, Some("root"), Some(&target), DIRROOT);
+            categorise(&result("public/mod/{$modname}/lib.php", 10), &locations, None, &HashSet::new(), Some("root"), Some(&target), DIRROOT);
         assert_eq!(category, PathCategory::DynamicComponent);
     }
 
@@ -228,7 +251,7 @@ mod tests {
     fn bare_dirroot_itself_is_dirroot_wrangling() {
         let locations = HashSet::new();
         let target = resolution("root", "/public");
-        let category = categorise(&result("public", 10), &locations, None, Some("tool_xmldb"), Some(&target), DIRROOT);
+        let category = categorise(&result("public", 10), &locations, None, &HashSet::new(), Some("tool_xmldb"), Some(&target), DIRROOT);
         assert_eq!(category, PathCategory::DirrootWrangling);
     }
 
@@ -236,7 +259,7 @@ mod tests {
     fn dirroot_with_a_trailing_separator_is_also_dirroot_wrangling() {
         let locations = HashSet::new();
         let target = resolution("root", "/public/");
-        let category = categorise(&result("public/", 10), &locations, None, Some("tool_xmldb"), Some(&target), DIRROOT);
+        let category = categorise(&result("public/", 10), &locations, None, &HashSet::new(), Some("tool_xmldb"), Some(&target), DIRROOT);
         assert_eq!(category, PathCategory::DirrootWrangling);
     }
 
@@ -249,7 +272,7 @@ mod tests {
     #[test]
     fn dirroot_with_a_trailing_backslash_is_also_dirroot_wrangling() {
         let locations = HashSet::new();
-        let category = categorise(&result("public\\", 10), &locations, None, Some("enrol_flatfile"), None, DIRROOT);
+        let category = categorise(&result("public\\", 10), &locations, None, &HashSet::new(), Some("enrol_flatfile"), None, DIRROOT);
         assert_eq!(category, PathCategory::DirrootWrangling);
     }
 
@@ -257,7 +280,7 @@ mod tests {
     fn bare_root_itself_is_root_wrangling() {
         let locations = HashSet::new();
         let target = resolution("root", "");
-        let category = categorise(&result("", 10), &locations, None, Some("tool_xmldb"), Some(&target), DIRROOT);
+        let category = categorise(&result("", 10), &locations, None, &HashSet::new(), Some("tool_xmldb"), Some(&target), DIRROOT);
         assert_eq!(category, PathCategory::RootWrangling);
     }
 
@@ -268,7 +291,7 @@ mod tests {
     fn root_with_a_trailing_separator_is_also_root_wrangling() {
         let locations = HashSet::new();
         let target = resolution("root", "/");
-        let category = categorise(&result("/", 10), &locations, None, Some("tool_xmldb"), Some(&target), DIRROOT);
+        let category = categorise(&result("/", 10), &locations, None, &HashSet::new(), Some("tool_xmldb"), Some(&target), DIRROOT);
         assert_eq!(category, PathCategory::RootWrangling);
     }
 
@@ -278,28 +301,58 @@ mod tests {
     #[test]
     fn root_with_a_trailing_backslash_is_also_root_wrangling() {
         let locations = HashSet::new();
-        let category = categorise(&result("\\", 10), &locations, None, Some("tool_xmldb"), None, DIRROOT);
+        let category = categorise(&result("\\", 10), &locations, None, &HashSet::new(), Some("tool_xmldb"), None, DIRROOT);
         assert_eq!(category, PathCategory::RootWrangling);
     }
 
     /// A plugin-type root (e.g. `$CFG->dirroot . '/mod'`) resolves to the same `root`
     /// pseudo-component as dirroot itself, but there is real content after dirroot in the
-    /// reference, so it is not dirroot-wrangling — it falls through to the ordinary
-    /// same/different-component rules like anything else that resolves to `root`.
+    /// reference, so it is not dirroot-wrangling — and now that it is a known plugin type's own
+    /// root directory, it is `PluginTypeRoot`, not the ordinary same-component fallback it would
+    /// otherwise land in like anything else that resolves to `root`.
     #[test]
-    fn a_plugin_type_root_falls_through_to_static_same_component() {
+    fn a_known_plugin_type_root_is_plugin_type_root_not_static_same_component() {
         let locations = HashSet::new();
+        let plugin_type_roots = HashSet::from(["public/mod".to_string()]);
         let target = resolution("root", "/public/mod");
-        let category = categorise(&result("public/mod", 10), &locations, None, Some("root"), Some(&target), DIRROOT);
-        assert_eq!(category, PathCategory::StaticSameComponent);
+        let category = categorise(&result("public/mod", 10), &locations, None, &plugin_type_roots, Some("root"), Some(&target), DIRROOT);
+        assert_eq!(category, PathCategory::PluginTypeRoot);
     }
 
+    /// The same shape referenced from a plugin instead of `root` — `PluginTypeRoot` wins
+    /// regardless of the source component, since it is checked before the same/different-component
+    /// distinction is even considered.
     #[test]
-    fn a_plugin_type_root_referenced_from_a_plugin_is_static_different_component() {
+    fn a_known_plugin_type_root_is_plugin_type_root_not_static_different_component() {
         let locations = HashSet::new();
+        let plugin_type_roots = HashSet::from(["public/mod".to_string()]);
         let target = resolution("root", "/public/mod");
-        let category = categorise(&result("public/mod", 10), &locations, None, Some("mod_forum"), Some(&target), DIRROOT);
-        assert_eq!(category, PathCategory::StaticDifferentComponent);
+        let category =
+            categorise(&result("public/mod", 10), &locations, None, &plugin_type_roots, Some("mod_forum"), Some(&target), DIRROOT);
+        assert_eq!(category, PathCategory::PluginTypeRoot);
+    }
+
+    /// A trailing separator appended by how the reference was concatenated (e.g.
+    /// `$CFG->dirroot . '/mod/'`) still means the plugin type's own root directory, the same
+    /// tolerance `DirrootWrangling`/`RootWrangling` give their own fixed location.
+    #[test]
+    fn plugin_type_root_tolerates_a_trailing_separator() {
+        let locations = HashSet::new();
+        let plugin_type_roots = HashSet::from(["public/mod".to_string()]);
+        let category = categorise(&result("public/mod/", 10), &locations, None, &plugin_type_roots, Some("root"), None, DIRROOT);
+        assert_eq!(category, PathCategory::PluginTypeRoot);
+    }
+
+    /// `PreComponent` is still checked first: real file-loading work with no possible access to
+    /// core\component yet must win even over a reference that happens to be a plugin type's own
+    /// root directory.
+    #[test]
+    fn pre_component_still_wins_over_plugin_type_root() {
+        let locations = HashSet::new();
+        let plugin_type_roots = HashSet::from(["public/mod".to_string()]);
+        let category =
+            categorise(&result("public/mod", 10), &locations, Some(20), &plugin_type_roots, Some("root"), None, DIRROOT);
+        assert_eq!(category, PathCategory::PreComponent);
     }
 
     /// A bare directory that resolves to a real, known component (not the `root`
@@ -309,7 +362,7 @@ mod tests {
     fn a_bare_directory_resolving_to_a_real_component_is_static_same_component() {
         let locations = HashSet::new();
         let target = resolution("core", "");
-        let category = categorise(&result("public/lib", 10), &locations, None, Some("core"), Some(&target), DIRROOT);
+        let category = categorise(&result("public/lib", 10), &locations, None, &HashSet::new(), Some("core"), Some(&target), DIRROOT);
         assert_eq!(category, PathCategory::StaticSameComponent);
     }
 
@@ -317,7 +370,7 @@ mod tests {
     fn a_literal_file_in_the_same_component_is_static_same_component() {
         let locations = HashSet::new();
         let target = resolution("core", "/setup.php");
-        let category = categorise(&result("public/lib/setup.php", 10), &locations, None, Some("core"), Some(&target), DIRROOT);
+        let category = categorise(&result("public/lib/setup.php", 10), &locations, None, &HashSet::new(), Some("core"), Some(&target), DIRROOT);
         assert_eq!(category, PathCategory::StaticSameComponent);
     }
 
@@ -326,28 +379,28 @@ mod tests {
         let locations = HashSet::new();
         let target = resolution("core", "/classes/component.php");
         let category =
-            categorise(&result("public/lib/classes/component.php", 10), &locations, None, Some("root"), Some(&target), DIRROOT);
+            categorise(&result("public/lib/classes/component.php", 10), &locations, None, &HashSet::new(), Some("root"), Some(&target), DIRROOT);
         assert_eq!(category, PathCategory::StaticDifferentComponent);
     }
 
     #[test]
     fn an_unresolved_path_shaped_by_a_variable_is_variable_only() {
         let locations = HashSet::new();
-        let category = categorise(&result("public{$includefile}", 10), &locations, None, Some("core"), None, DIRROOT);
+        let category = categorise(&result("public{$includefile}", 10), &locations, None, &HashSet::new(), Some("core"), None, DIRROOT);
         assert_eq!(category, PathCategory::VariableOnly);
     }
 
     #[test]
     fn an_unresolved_path_escaping_the_repository_root_is_uncategorised_not_variable_only() {
         let locations = HashSet::new();
-        let category = categorise(&result("../moodledata", 10), &locations, None, Some("root"), None, DIRROOT);
+        let category = categorise(&result("../moodledata", 10), &locations, None, &HashSet::new(), Some("root"), None, DIRROOT);
         assert_eq!(category, PathCategory::Uncategorised);
     }
 
     #[test]
     fn an_unresolved_path_with_no_dynamic_marker_at_all_is_uncategorised() {
         let locations = HashSet::new();
-        let category = categorise(&result("some/weird/path", 10), &locations, None, Some("root"), None, DIRROOT);
+        let category = categorise(&result("some/weird/path", 10), &locations, None, &HashSet::new(), Some("root"), None, DIRROOT);
         assert_eq!(category, PathCategory::Uncategorised);
     }
 
@@ -356,7 +409,7 @@ mod tests {
         let locations = HashSet::new();
         let target = resolution("root", "/public/backup/backup.class.php");
         let category =
-            categorise(&result("public/backup/backup.class.php", 10), &locations, None, Some("tool_xmldb"), Some(&target), DIRROOT);
+            categorise(&result("public/backup/backup.class.php", 10), &locations, None, &HashSet::new(), Some("tool_xmldb"), Some(&target), DIRROOT);
         assert_eq!(category, PathCategory::StaticDifferentComponent);
     }
 
@@ -369,7 +422,7 @@ mod tests {
     fn pre_5_1_dirroot_and_root_coincide_and_resolve_to_dirroot_wrangling() {
         let locations = HashSet::new();
         let target = resolution("root", "");
-        let category = categorise(&result("", 10), &locations, None, Some("tool_xmldb"), Some(&target), "");
+        let category = categorise(&result("", 10), &locations, None, &HashSet::new(), Some("tool_xmldb"), Some(&target), "");
         assert_eq!(category, PathCategory::DirrootWrangling);
     }
 }

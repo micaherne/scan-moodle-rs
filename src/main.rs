@@ -262,6 +262,8 @@ fn find_paths_command(
             .filter_map(|classification| classification.line.map(|line| (classification.file, line)))
             .collect()
     });
+    let plugin_type_roots: Option<HashSet<String>> =
+        categorise.then(|| discovered.plugin_types.values().cloned().collect());
 
     let mut header = vec![
         "file",
@@ -328,6 +330,7 @@ fn find_paths_command(
                         result,
                         config_locations.as_ref().expect("categorise implies config_locations is set"),
                         file_boundary_line,
+                        plugin_type_roots.as_ref().expect("categorise implies plugin_type_roots is set"),
                         source_component.as_deref(),
                         target.as_ref(),
                         dirroot,
