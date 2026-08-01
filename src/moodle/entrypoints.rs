@@ -19,11 +19,14 @@
 //! config.php at all (e.g. install.php). Outside `bootstrap_only`, a file that is also an entry
 //! point is reported as such rather than as bootstrap: knowing it's a page is more useful than
 //! knowing it eventually reaches component.php — *unless* it does real file-loading work of its
-//! own before its own config.php line (see [`pre_config_require_line`]), such as
+//! own before its own config.php line (see [`bootstrap_boundary_for_pre_config_work`]), such as
 //! public/lib/phpunit/bootstrap.php's two requires before its config.php require: those requires
 //! run with no possible access to core\component yet, regardless of what they themselves happen to
 //! lead to, which earns "bootstrap" outright, and unlike the general precedence rule, that is not
 //! affected by `bootstrap_only` — it comes entirely from real edges, no synthetic chain involved.
+//! The reported boundary line is still the file's own config.php line, not the earlier require
+//! that triggered the rule — that earlier line only proves the rule applies, it is not where
+//! access to core\component actually begins.
 //!
 //! A require/include edge is recorded regardless of whether it sits at the top level of the file
 //! or nested inside a function or method body (e.g. `\core\router\util::load_full_moodle()`,
@@ -140,7 +143,7 @@ pub fn classify(files: &[(String, Vec<PathResult>)], notation: &PathNotation, bo
         // go on to lead to — that earns "bootstrap" regardless of the file also being an entry
         // point, and unlike the general entry-point/bootstrap precedence below, it is not
         // suppressed by `bootstrap_only`: it comes entirely from real edges.
-        if let Some(line) = pre_config_require_line(file, &forward, &config_seeds) {
+        if let Some(line) = bootstrap_boundary_for_pre_config_work(file, &forward, &config_seeds) {
             classifications.push(FileClassification { file: file.clone(), kind: EntrypointKind::Bootstrap, line: Some(line) });
         } else if !bootstrap_only {
             classifications.push(FileClassification {
@@ -235,19 +238,22 @@ fn reverse_closure(seeds: impl IntoIterator<Item = String>, reverse: &ReverseEdg
     closure
 }
 
-/// The earliest line, among `file`'s own require/include edges, that comes before its own
-/// earliest edge into `config_seeds` — i.e. real file-loading work `file` does before config.php
-/// (and so before core\component) could possibly be available to it yet, regardless of what that
-/// earlier require itself goes on to lead to. `None` if `file` has no edge into `config_seeds` at
-/// all (not an entry point), or if nothing precedes it.
-fn pre_config_require_line(
+/// `file`'s own line requiring config.php — the point after which it gains access to
+/// core\component, transitively, the same as any other bootstrap file's boundary — but only when
+/// at least one of `file`'s *other* require/include edges comes before that line, i.e. `file` does
+/// real file-loading work of its own before config.php (and so before core\component) could
+/// possibly be available to it yet, regardless of what that earlier require itself goes on to lead
+/// to. That earlier line is only evidence that this rule applies at all; it is not itself the
+/// boundary, which is always `file`'s own config.php line. `None` if `file` has no edge into
+/// `config_seeds` at all (not an entry point), or if nothing precedes it (no such earlier work).
+fn bootstrap_boundary_for_pre_config_work(
     file: &str,
     forward: &ForwardEdges,
     config_seeds: &HashSet<String>,
 ) -> Option<u32> {
     let edges = forward.get(file)?;
     let config_line = edges.iter().filter(|(target, _)| config_seeds.contains(target)).filter_map(|(_, line)| *line).min()?;
-    edges.iter().filter_map(|(_, line)| *line).filter(|&line| line < config_line).min()
+    edges.iter().filter_map(|(_, line)| *line).any(|line| line < config_line).then_some(config_line)
 }
 
 /// The smallest line, among `file`'s own require/include statements, that points at something
@@ -336,8 +342,10 @@ mod tests {
     /// public/lib/phpunit/bootstrap.php: two requires before its own config.php require. Neither
     /// target reaches component.php on its own (they're self-contained PHPUnit helper libraries),
     /// so this is only detectable from *when* they happen relative to config.php, not *what they
-    /// lead to* — the earliest of the two earns "bootstrap", overriding the entry-point kind this
-    /// file would otherwise get purely from requiring config.php.
+    /// lead to* — having at least one of them earns "bootstrap", overriding the entry-point kind
+    /// this file would otherwise get purely from requiring config.php. The reported boundary is
+    /// still the file's own config.php line (86), not either of the two requires that triggered
+    /// the rule — access to core\component only actually begins once config.php has run.
     #[test]
     fn entrypoint_with_a_require_before_its_own_config_line_is_bootstrap() {
         let files = vec![(
@@ -354,7 +362,7 @@ mod tests {
             vec![FileClassification {
                 file: "public/lib/phpunit/bootstrap.php".to_string(),
                 kind: EntrypointKind::Bootstrap,
-                line: Some(51),
+                line: Some(86),
             }]
         );
     }
@@ -377,7 +385,7 @@ mod tests {
             vec![FileClassification {
                 file: "public/lib/phpunit/bootstrap.php".to_string(),
                 kind: EntrypointKind::Bootstrap,
-                line: Some(51),
+                line: Some(86),
             }]
         );
     }
