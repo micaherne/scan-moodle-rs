@@ -218,6 +218,27 @@ fn is_plain_segment(segment: &str) -> bool {
 
 /// Whether `segment` is entirely a single dynamic marker (e.g. '{$themename}'), with no literal
 /// text alongside it.
+///
+/// `segment` is one piece of the path as already split on '/', so when it sits between two other
+/// segments, the slashes on both sides are real characters from the source and genuinely prove
+/// the marker's value ends exactly there. When it is the *last* segment, though, there is no such
+/// proof: `path.split('/')` gives the last chunk the same shape whether or not a '/' actually
+/// followed it in the source, so this function cannot tell "the reference plainly stops here"
+/// (true in practice for something like `mod/{$modname}`, a bare plugin directory) apart from "the
+/// variable's own value happens to contain a '/', so what looks like one clean segment is really
+/// more than one" — which is exactly what happens in `public/install/css.php`, where a loop
+/// variable is assigned a literal path with a slash in it (`'boost/style/moodle.css'`) and then
+/// glued onto `__DIR__.'/../theme/'`, making that reference resolve as if
+/// `boost/style/moodle.css` were a single plugin name.
+///
+/// This is a known, accepted inaccuracy rather than a gap left to fix: tightening this function to
+/// require a real trailing separator would fix that one file but wrongly reclassify every genuine
+/// bare-plugin-root reference like `mod/{$modname}` along with it, which is by far the more common
+/// shape in practice. And since nothing in [`PathCategory::DynamicComponent`] can be safely acted
+/// on without a human first checking what values the marker could actually take, a stray
+/// false-positive here is caught by that same manual review rather than silently causing harm.
+///
+/// [`PathCategory::DynamicComponent`]: crate::moodle::categorise::PathCategory::DynamicComponent
 fn is_whole_dynamic_segment(segment: &str) -> bool {
     segment.starts_with('{') && segment.ends_with('}')
 }

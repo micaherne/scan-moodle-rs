@@ -189,6 +189,11 @@ mod tests {
     /// A dynamic plugin name at its own bare plugin root (nothing after it) is still
     /// `DynamicComponent` — the dynamic name is what decides how a reference like this could be
     /// rewritten, whether or not it goes on to name a file inside that plugin.
+    ///
+    /// This shape is genuinely ambiguous with a rarer, wrongly-classified one — see the
+    /// known-inaccuracy note on `is_whole_dynamic_segment` in `resolver.rs` — but is kept as-is
+    /// because it is right far more often than not, and every `DynamicComponent` result already
+    /// needs human review before being acted on regardless.
     #[test]
     fn a_dynamic_plugin_name_at_its_own_bare_root_is_dynamic_component() {
         let locations = HashSet::new();
