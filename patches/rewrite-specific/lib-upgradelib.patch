@@ -1,0 +1,17 @@
+diff --git a/public/lib/upgradelib.php b/public/lib/upgradelib.php
+index 5555d01..ca5fcfd 100644
+--- a/public/lib/upgradelib.php
++++ b/public/lib/upgradelib.php
+@@ -150,10 +150,10 @@ class plugin_misplaced_exception extends moodle_exception {
+             }
+         }
+         if (strpos($expected, '$CFG->dirroot') !== 0) {
+-            $expected = str_replace($CFG->dirroot, '$CFG->dirroot', $expected);
++            $expected = '$CFG->dirroot' . \core\component::to_mono_path($expected, leadingslash: true);
+         }
+         if (strpos($current, '$CFG->dirroot') !== 0) {
+-            $current = str_replace($CFG->dirroot, '$CFG->dirroot', $current);
++            $current = '$CFG->dirroot' . \core\component::to_mono_path($current, leadingslash: true);
+         }
+         $a = new stdClass();
+         $a->component = $component;

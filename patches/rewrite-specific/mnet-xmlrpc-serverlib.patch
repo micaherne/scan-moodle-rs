@@ -1,0 +1,13 @@
+diff --git a/public/mnet/xmlrpc/serverlib.php b/public/mnet/xmlrpc/serverlib.php
+index 7b7ec12fdbe..3c2963c28fb 100644
+--- a/public/mnet/xmlrpc/serverlib.php
++++ b/public/mnet/xmlrpc/serverlib.php
+@@ -611,7 +611,7 @@ function mnet_setup_dummy_method($method, $callstack, $rpcrecord) {
+     // verify that the callpath in the stack matches our records
+     // callstack will look like array('mod', 'forum', 'lib.php', 'forum_add_instance');
+     $path = core_component::get_plugin_directory($rpcrecord->plugintype, $rpcrecord->pluginname);
+-    $path = substr($path, strlen($CFG->dirroot)+1); // this is a bit hacky and fragile, it is not guaranteed that plugins are in dirroot
++    $path = \core\component::to_mono_path($path, leadingslash: false); // this is a bit hacky and fragile, it is not guaranteed that plugins are in dirroot
+     array_pop($callstack);
+     $providedpath =  implode('/', $callstack);
+     if ($providedpath != $path . '/' . $rpcrecord->filename) {

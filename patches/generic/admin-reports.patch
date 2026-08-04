@@ -1,0 +1,24 @@
+diff --git a/public/admin/reports.php b/public/admin/reports.php
+index 2292425addf..ca8b1150470 100644
+--- a/public/admin/reports.php
++++ b/public/admin/reports.php
+@@ -93,8 +93,9 @@ foreach ($plugins as $plugin => $name) {
+         $supportedstores = get_string('nosupportedlogstore', 'admin');;
+     }
+ 
++    $reportdir = \core_component::get_plugin_directory('report', $plugin);
+     if (!isset($versions[$plugin])) {
+-        if (file_exists("$CFG->dirroot/report/$plugin/version.php")) {
++        if ($reportdir && file_exists("$reportdir/version.php")) {
+             // not installed yet
+             $version = '?';
+         } else {
+@@ -103,7 +104,7 @@ foreach ($plugins as $plugin => $name) {
+         }
+     } else {
+         $version = $versions[$plugin];
+-        if (file_exists("$CFG->dirroot/report/$plugin")) {
++        if ($reportdir) {
+             $version = $versions[$plugin];
+         } else {
+             // somebody removed plugin without uninstall

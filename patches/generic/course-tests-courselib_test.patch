@@ -1,0 +1,30 @@
+diff --git a/public/course/tests/courselib_test.php b/public/course/tests/courselib_test.php
+index cbc2d37baa0..ef87729f428 100644
+--- a/public/course/tests/courselib_test.php
++++ b/public/course/tests/courselib_test.php
+@@ -214,7 +214,11 @@ final class courselib_test extends advanced_testcase {
+         $this->setAdminUser();
+ 
+         // Warnings: you'll need to change this line if ever you come to test a module not following Moodle standard.
+-        require_once($CFG->dirroot.'/mod/'. $modulename .'/lib.php');
++        $moddir = \core_component::get_plugin_directory('mod', $modulename);
++        if ($moddir === null) {
++            throw new \coding_exception("Plugin not installed: mod_{$modulename}");
++        }
++        require_once("$moddir/lib.php");
+ 
+         // Enable avaibility.
+         // If not enabled all conditional fields will be ignored.
+@@ -490,7 +494,11 @@ final class courselib_test extends advanced_testcase {
+         $this->setAdminUser();
+ 
+         // Warnings: you'll need to change this line if ever you come to test a module not following Moodle standard.
+-        require_once($CFG->dirroot.'/mod/'. $modulename .'/lib.php');
++        $moddir = \core_component::get_plugin_directory('mod', $modulename);
++        if ($moddir === null) {
++            throw new \coding_exception("Plugin not installed: mod_{$modulename}");
++        }
++        require_once("$moddir/lib.php");
+ 
+         // Enable avaibility.
+         // If not enabled all conditional fields will be ignored.

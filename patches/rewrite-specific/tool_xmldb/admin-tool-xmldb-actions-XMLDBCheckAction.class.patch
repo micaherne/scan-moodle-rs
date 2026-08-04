@@ -1,0 +1,13 @@
+diff --git a/public/admin/tool/xmldb/actions/XMLDBCheckAction.class.php b/public/admin/tool/xmldb/actions/XMLDBCheckAction.class.php
+index 848c281..b0d7e5c 100644
+--- a/public/admin/tool/xmldb/actions/XMLDBCheckAction.class.php
++++ b/public/admin/tool/xmldb/actions/XMLDBCheckAction.class.php
+@@ -138,7 +138,7 @@ abstract class XMLDBCheckAction extends XMLDBAction {
+                     // Arriving here, everything is ok, get the XMLDB structure
+                     $structure = $xmldb_file->getStructure();
+ 
+-                    $o.='    <li>' . str_replace($CFG->dirroot . '/', '', $dbdir->path . '/install.xml');
++                    $o.='    <li>' . \core\component::to_mono_path($dbdir->path . '/install.xml', false);
+                     // Getting tables
+                     if ($xmldb_tables = $structure->getTables()) {
+                         $o.='        <ul>';

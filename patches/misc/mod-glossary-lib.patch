@@ -1,0 +1,22 @@
+diff --git a/public/mod/glossary/lib.php b/public/mod/glossary/lib.php
+index 19beba1371c..17071a258bf 100644
+--- a/public/mod/glossary/lib.php
++++ b/public/mod/glossary/lib.php
+@@ -82,7 +82,7 @@ function glossary_add_instance($glossary) {
+     $glossary->timemodified = $glossary->timecreated;
+ 
+     //Check displayformat is a valid one
+-    $formats = get_list_of_plugins('mod/glossary/formats','TEMPLATE');
++    $formats = get_list_of_plugins('formats', 'TEMPLATE', \core_component::get_component_directory('mod_glossary'));
+     if (!in_array($glossary->displayformat, $formats)) {
+         throw new \moodle_exception('unknowformat', '', '', $glossary->displayformat);
+     }
+@@ -129,7 +129,7 @@ function glossary_update_instance($glossary) {
+     }
+ 
+     //Check displayformat is a valid one
+-    $formats = get_list_of_plugins('mod/glossary/formats','TEMPLATE');
++    $formats = get_list_of_plugins('formats', 'TEMPLATE', \core_component::get_component_directory('mod_glossary'));
+     if (!in_array($glossary->displayformat, $formats)) {
+         throw new \moodle_exception('unknowformat', '', '', $glossary->displayformat);
+     }

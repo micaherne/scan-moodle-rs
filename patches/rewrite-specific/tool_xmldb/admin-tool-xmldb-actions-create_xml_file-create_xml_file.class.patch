@@ -1,0 +1,13 @@
+diff --git a/public/admin/tool/xmldb/actions/create_xml_file/create_xml_file.class.php b/public/admin/tool/xmldb/actions/create_xml_file/create_xml_file.class.php
+index 4b74613..97f4b31 100644
+--- a/public/admin/tool/xmldb/actions/create_xml_file/create_xml_file.class.php
++++ b/public/admin/tool/xmldb/actions/create_xml_file/create_xml_file.class.php
+@@ -71,7 +71,7 @@ class create_xml_file extends XMLDBAction {
+         $file = $dirpath . '/install.xml';
+ 
+         // Some variables
+-        $xmlpath = dirname(str_replace($CFG->dirroot . '/', '', $file));
++        $xmlpath = dirname(\core\component::to_mono_path($file, false));
+         $xmlversion = userdate(time(), '%Y%m%d', 99, false);
+         $xmlcomment = 'XMLDB file for Moodle ' . dirname($xmlpath);
+ 

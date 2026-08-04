@@ -1,0 +1,16 @@
+diff --git a/public/theme/image.php b/public/theme/image.php
+index ca99c6f66b7..4908f5fcc88 100644
+--- a/public/theme/image.php
++++ b/public/theme/image.php
+@@ -71,9 +71,8 @@ if (empty($image)) {
+     image_not_found();
+ }
+ 
+-if (file_exists("$CFG->dirroot/theme/$themename/config.php")) {
+-    // exists
+-} else if (!empty($CFG->themedir) and file_exists("$CFG->themedir/$themename/config.php")) {
++$themedir = \core_component::get_plugin_directory('theme', $themename);
++if ($themedir && file_exists("$themedir/config.php")) {
+     // exists
+ } else {
+     image_not_found();

@@ -1,0 +1,19 @@
+diff --git a/public/admin/tool/mobile/classes/api.php b/public/admin/tool/mobile/classes/api.php
+index 6e77938c5bd..4bdaa28ff48 100644
+--- a/public/admin/tool/mobile/classes/api.php
++++ b/public/admin/tool/mobile/classes/api.php
+@@ -94,12 +94,11 @@ class api {
+         }
+ 
+         $pluginsinfo = [];
++        $plugintypes = core_component::get_plugin_types();
+         // For not logged users return only auth plugins.
+         // This is to prevent anyone (not being a registered user) from obtaining and downloading all the site plugins.
+         if (!isloggedin()) {
+-            $plugintypes = array('auth' => $CFG->dirroot.'/auth');
+-        } else {
+-            $plugintypes = core_component::get_plugin_types();
++            $plugintypes = ['auth' => $plugintypes['auth']];
+         }
+ 
+         foreach ($plugintypes as $plugintype => $unused) {

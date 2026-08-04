@@ -1,0 +1,18 @@
+diff --git a/public/mod/subsection/classes/manager.php b/public/mod/subsection/classes/manager.php
+index 14a89f356a8..92d4832df66 100644
+--- a/public/mod/subsection/classes/manager.php
++++ b/public/mod/subsection/classes/manager.php
+@@ -59,12 +59,11 @@ class manager {
+      * @param stdClass $instance activity instance object.
+      */
+     public function __construct(cm_info $cm, stdClass $instance) {
+-        global $CFG;
+         $this->cm = $cm;
+         $this->instance = $instance;
+         $this->context = context_module::instance($cm->id);
+         $this->instance->cmidnumber = $cm->idnumber;
+-        $this->path = $CFG->dirroot . '/mod/' . self::MODULE;
++        $this->path = \core_component::get_plugin_directory('mod', self::MODULE);
+     }
+ 
+     /**

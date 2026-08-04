@@ -3,6 +3,9 @@ name = "scan-moodle"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+rewrite = []
+
 [dependencies]
 rayon = "1"
 walkdir = "2"

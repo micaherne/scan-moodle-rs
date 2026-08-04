@@ -1,0 +1,20 @@
+diff --git a/public/mod/quiz/tests/backup/repeated_restore_test.php b/public/mod/quiz/tests/backup/repeated_restore_test.php
+index c021cd3a777..5c2ab377ae4 100644
+--- a/public/mod/quiz/tests/backup/repeated_restore_test.php
++++ b/public/mod/quiz/tests/backup/repeated_restore_test.php
+@@ -595,11 +595,12 @@ final class repeated_restore_test extends advanced_testcase {
+      * @return array
+      */
+     public static function get_qtype_generators(): array {
+-        global $CFG;
++        global $CFG; // Needed in scope for the required qtype test helper.php.
+         $generators = [];
+         foreach (\core\plugin_manager::instance()->get_plugins_of_type('qtype') as $qtype) {
+-            $helperpath = "{$CFG->dirroot}/question/type/{$qtype->name}/tests/helper.php";
+-            if (!file_exists($helperpath)) {
++            $dir = \core_component::get_plugin_directory('qtype', $qtype->name);
++            $helperpath = $dir ? "$dir/tests/helper.php" : null;
++            if ($helperpath === null || !file_exists($helperpath)) {
+                 continue;
+             }
+             require_once($helperpath);

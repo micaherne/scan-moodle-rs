@@ -1,0 +1,13 @@
+diff --git a/public/theme/yui_combo.php b/public/theme/yui_combo.php
+index 319faa4e255..e567a5c37e2 100644
+--- a/public/theme/yui_combo.php
++++ b/public/theme/yui_combo.php
+@@ -306,7 +306,7 @@ while (count($parts)) {
+         $contentfile = "$CFG->libdir/yuilib/$part";
+     }
+     if (!file_exists($contentfile) or !is_file($contentfile)) {
+-        $location = '$CFG->dirroot'.preg_replace('/^'.preg_quote($CFG->dirroot, '/').'/', '', $contentfile);
++        $location = '$CFG->dirroot'.\core\component::to_mono_path($contentfile, leadingslash: true);
+         $content .= "\n// Combo resource $part ($location) not found!\n";
+         continue;
+     }

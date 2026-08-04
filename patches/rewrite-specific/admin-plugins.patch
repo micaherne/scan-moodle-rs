@@ -1,0 +1,13 @@
+diff --git a/public/admin/plugins.php b/public/admin/plugins.php
+index 98a250b..e9e3074 100644
+--- a/public/admin/plugins.php
++++ b/public/admin/plugins.php
+@@ -147,7 +147,7 @@ if ($delete and $confirmed) {
+     }
+ 
+     // Make sure the folder is within Moodle installation tree.
+-    if (strpos($pluginfo->rootdir, $CFG->dirroot) !== 0) {
++    if (!\core\component::is_inside_codebase($pluginfo->rootdir)) {
+         throw new moodle_exception('err_unexpected_plugin_rootdir', 'core_plugin', '',
+             array('plugin' => $pluginfo->component, 'rootdir' => $pluginfo->rootdir, 'dirroot' => $CFG->dirroot),
+             'plugin root folder not in the moodle dirroot');

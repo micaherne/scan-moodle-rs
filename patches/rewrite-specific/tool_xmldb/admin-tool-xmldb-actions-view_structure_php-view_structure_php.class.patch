@@ -1,0 +1,22 @@
+diff --git a/public/admin/tool/xmldb/actions/view_structure_php/view_structure_php.class.php b/public/admin/tool/xmldb/actions/view_structure_php/view_structure_php.class.php
+index ba03343..377a454 100644
+--- a/public/admin/tool/xmldb/actions/view_structure_php/view_structure_php.class.php
++++ b/public/admin/tool/xmldb/actions/view_structure_php/view_structure_php.class.php
+@@ -93,7 +93,7 @@ class view_structure_php extends XMLDBAction {
+ 
+         // The back to edit xml button
+         $b = ' <p class="centerpara buttons">';
+-        $b .= '<a href="index.php?action=edit_xml_file&amp;dir=' . urlencode(str_replace($CFG->dirroot, '', $dirpath)) . '">[' . $this->str['back'] . ']</a>';
++        $b .= '<a href="index.php?action=edit_xml_file&amp;dir=' . urlencode(\core\component::to_mono_path($dirpath, true)) . '">[' . $this->str['back'] . ']</a>';
+         $b .= '</p>';
+         $o = $b;
+ 
+@@ -111,7 +111,7 @@ class view_structure_php extends XMLDBAction {
+         // Now build the form
+         $o.= '<form id="form" action="index.php" method="post">';
+         $o.='<div>';
+-        $o.= '    <input type="hidden" name ="dir" value="' . str_replace($CFG->dirroot, '', $dirpath) . '" />';
++        $o.= '    <input type="hidden" name ="dir" value="' . \core\component::to_mono_path($dirpath, true) . '" />';
+         $o.= '    <input type="hidden" name ="action" value="view_structure_php" />';
+         $o .= '   <table id="formelements" class="table-reboot" cellpadding="5">';
+         $o.= '      <tr><td><label for="menucommand" accesskey="c">' . $this->str['selectaction'] .' </label>' . html_writer::select($popcommands, 'command', $commandparam, false) . '&nbsp;<label for="menutable" accesskey="t">' . $this->str['selecttable'] . ' </label>' .html_writer::select($poptables, 'table', $tableparam, false) . '</td></tr>';

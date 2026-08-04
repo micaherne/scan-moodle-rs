@@ -1,0 +1,35 @@
+diff --git a/public/lib/classes/output/requirements/page_requirements_manager.php b/public/lib/classes/output/requirements/page_requirements_manager.php
+index 66009dbf87e..9c01f221c1c 100644
+--- a/public/lib/classes/output/requirements/page_requirements_manager.php
++++ b/public/lib/classes/output/requirements/page_requirements_manager.php
+@@ -611,8 +611,8 @@ class page_requirements_manager {
+             } else {
+                 // This is not really good, we need slasharguments for relative links, this means no caching...
+                 $path = realpath("$componentdir/jquery/$file");
+-                if (strpos($path, $CFG->dirroot) === 0) {
+-                    $url = $CFG->wwwroot . preg_replace('/^' . preg_quote($CFG->dirroot, '/') . '/', '', $path);
++                if (\core\component::is_inside_codebase($path, '')) {
++                    $url = $CFG->wwwroot . \core\component::to_mono_path($path, leadingslash: true);
+                     // Replace all occurences of backslashes characters in url to forward slashes.
+                     $url = str_replace('\\', '/', $url);
+                     $url = new moodle_url($url);
+@@ -790,7 +790,7 @@ class page_requirements_manager {
+      * @return array description of module or null if not found
+      */
+     protected function find_module($component) {
+-        global $CFG, $PAGE;
++        global $PAGE;
+ 
+         $module = null;
+ 
+@@ -889,8 +889,8 @@ class page_requirements_manager {
+         } else {
+             if ($dir = core_component::get_component_directory($component)) {
+                 if (file_exists("$dir/module.js")) {
+-                    if (strpos($dir, $CFG->dirroot . '/') === 0) {
+-                        $dir = substr($dir, strlen($CFG->dirroot));
++                    if (\core\component::is_inside_codebase($dir)) {
++                        $dir = \core\component::to_mono_path($dir, leadingslash: true);
+                         $module = ['name' => $component, 'fullpath' => "$dir/module.js", 'requires' => []];
+                     }
+                 }

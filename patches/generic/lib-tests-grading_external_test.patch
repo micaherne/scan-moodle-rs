@@ -1,0 +1,17 @@
+diff --git a/public/lib/tests/grading_external_test.php b/public/lib/tests/grading_external_test.php
+index f46e206e204..866b763ddfa 100644
+--- a/public/lib/tests/grading_external_test.php
++++ b/public/lib/tests/grading_external_test.php
+@@ -149,7 +149,11 @@ final class grading_external_test extends \core_external\tests\externallib_testc
+         $this->assertEquals($USER->id, $definition['usercreated']);
+ 
+         require_once("$CFG->dirroot/grade/grading/lib.php");
+-        require_once($CFG->dirroot.'/grade/grading/form/'.$rubricdefinition['method'].'/lib.php');
++        $formdir = \core_component::get_plugin_directory('gradingform', $rubricdefinition['method']);
++        if ($formdir === null) {
++            throw new \coding_exception("Plugin not installed: gradingform_" . $rubricdefinition['method']);
++        }
++        require_once($formdir . '/lib.php');
+ 
+         $gradingmanager = get_grading_manager($areaid);
+ 

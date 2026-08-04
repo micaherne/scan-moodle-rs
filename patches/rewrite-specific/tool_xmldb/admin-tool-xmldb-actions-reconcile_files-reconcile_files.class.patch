@@ -1,0 +1,13 @@
+diff --git a/public/admin/tool/xmldb/actions/reconcile_files/reconcile_files.class.php b/public/admin/tool/xmldb/actions/reconcile_files/reconcile_files.class.php
+index 5901bc5..6aff010 100644
+--- a/public/admin/tool/xmldb/actions/reconcile_files/reconcile_files.class.php
++++ b/public/admin/tool/xmldb/actions/reconcile_files/reconcile_files.class.php
+@@ -99,7 +99,7 @@ class reconcile_files extends XMLDBAction {
+                 $current = $currentdom->saveXML();
+ 
+                 if ($current !== $correct) {
+-                    $relpath = str_replace($CFG->dirroot . '/', '', $key) . '/install.xml';
++                    $relpath = \core\component::to_mono_path($key, false) . '/install.xml';
+                     $needfix[] = $relpath;
+                     // Left here on purpose, as a quick way to fix problems. To be
+                     // enabled and run by developers only, uncomment the next line:

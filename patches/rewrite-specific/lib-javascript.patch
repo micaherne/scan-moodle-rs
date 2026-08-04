@@ -1,0 +1,13 @@
+diff --git a/public/lib/javascript.php b/public/lib/javascript.php
+index 703dabf7eac..e9a0f6533c3 100644
+--- a/public/lib/javascript.php
++++ b/public/lib/javascript.php
+@@ -65,7 +65,7 @@ foreach ($files as $fsfile) {
+         // Some shared hosting sites serve files directly from '/',
+         // this is NOT supported, but at least allow JS when showing
+         // errors and warnings.
+-    } else if (strpos($jsfile, $CFG->dirroot . DIRECTORY_SEPARATOR) !== 0) {
++    } else if (!\core\component::is_inside_codebase($jsfile, DIRECTORY_SEPARATOR)) {
+         // hackers - not in dirroot
+         continue;
+     }

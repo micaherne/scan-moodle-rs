@@ -1,0 +1,21 @@
+diff --git a/public/mod/assign/adminlib.php b/public/mod/assign/adminlib.php
+index 19f90c23b62..7893b35fec1 100644
+--- a/public/mod/assign/adminlib.php
++++ b/public/mod/assign/adminlib.php
+@@ -190,7 +190,6 @@ class assign_plugin_manager {
+         $table->setup();
+ 
+         $plugins = $this->get_sorted_plugins_list();
+-        $shortsubtype = substr($this->subtype, strlen('assign'));
+ 
+         foreach ($plugins as $idx => $plugin) {
+             $row = array();
+@@ -219,7 +218,7 @@ class assign_plugin_manager {
+             }
+             $row[] = $movelinks;
+ 
+-            $exists = file_exists($CFG->dirroot . '/mod/assign/' . $shortsubtype . '/' . $plugin . '/settings.php');
++            $exists = file_exists(\core\component::component_path($this->subtype . '_' . $plugin, 'settings.php'));
+             if ($row[1] != '' && $exists) {
+                 $row[] = html_writer::link(new moodle_url('/admin/settings.php',
+                         array('section' => $this->subtype . '_' . $plugin)), get_string('settings'));

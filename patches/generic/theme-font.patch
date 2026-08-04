@@ -1,0 +1,18 @@
+diff --git a/public/theme/font.php b/public/theme/font.php
+index 7752d48d186..4aa381b6737 100644
+--- a/public/theme/font.php
++++ b/public/theme/font.php
+@@ -96,10 +96,9 @@ if (preg_match('/^[a-z0-9_-]+(?:\/[a-z0-9_-]+)*\.woff2$/i', $font, $matches)) {
+     font_not_found();
+ }
+ 
+-if (file_exists("$CFG->dirroot/theme/$themename/config.php")) {
+-    // Normal theme exists.
+-} else if (!empty($CFG->themedir) and file_exists("$CFG->themedir/$themename/config.php")) {
+-    // Theme exists in alternative location.
++$themedir = \core_component::get_plugin_directory('theme', $themename);
++if ($themedir && file_exists("$themedir/config.php")) {
++    // Theme exists.
+ } else {
+     font_not_found();
+ }

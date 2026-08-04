@@ -1,0 +1,13 @@
+diff --git a/public/lib/weblib.php b/public/lib/weblib.php
+index a31955c9960..faafda905f0 100644
+--- a/public/lib/weblib.php
++++ b/public/lib/weblib.php
+@@ -2235,7 +2235,7 @@ function redirect($url, $message='', $delay=null, $messagetype = \core\output\no
+         $redirectby = 'Moodle';
+         if (debugging('', DEBUG_DEVELOPER)) {
+             $origin = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 1)[0];
+-            $redirectby .= ' /' . str_replace($CFG->dirroot . '/', '', $origin['file']) . ':' . $origin['line'];
++            $redirectby .= ' /' . \core\component::to_mono_path($origin['file'], leadingslash: false) . ':' . $origin['line'];
+         }
+         @header("X-Redirect-By: $redirectby");
+ 

@@ -1,0 +1,20 @@
+diff --git a/public/question/bank/importquestions/import.php b/public/question/bank/importquestions/import.php
+index 6b22b5ec920..81eccce7b17 100644
+--- a/public/question/bank/importquestions/import.php
++++ b/public/question/bank/importquestions/import.php
+@@ -92,12 +92,12 @@ if ($form = $importform->get_data()) {
+         throw new moodle_exception('uploadproblem');
+     }
+ 
+-    $formatfile = $CFG->dirroot . '/question/format/' . $form->format . '/format.php';
+-    if (!is_readable($formatfile)) {
++    $qformatdir = \core_component::get_plugin_directory('qformat', $form->format);
++    if (!$qformatdir || !is_readable("$qformatdir/format.php")) {
+         throw new moodle_exception('formatnotfound', 'question', '', $form->format);
+     }
+ 
+-    require_once($formatfile);
++    require_once("$qformatdir/format.php");
+ 
+     $classname = 'qformat_' . $form->format;
+     $qformat = new $classname();

@@ -1,0 +1,31 @@
+diff --git a/public/mod/feedback/lib.php b/public/mod/feedback/lib.php
+index ddab7534226..5ee205bf85f 100644
+--- a/public/mod/feedback/lib.php
++++ b/public/mod/feedback/lib.php
+@@ -1476,13 +1476,13 @@ function feedback_get_item_class($typ) {
+  * @param string $dir the subdir
+  * @return array pluginnames as string
+  */
+-function feedback_load_feedback_items($dir = 'mod/feedback/item') {
+-    global $CFG;
+-    $names = get_list_of_plugins($dir);
++function feedback_load_feedback_items($dir = 'item') {
++    $componentdir = \core_component::get_component_directory('mod_feedback');
++    $names = get_list_of_plugins($dir, '', $componentdir);
+     $ret_names = array();
+ 
+     foreach ($names as $name) {
+-        require_once($CFG->dirroot.'/'.$dir.'/'.$name.'/lib.php');
++        require_once($componentdir . '/' . $dir . '/' . $name . '/lib.php');
+         if (class_exists('feedback_item_'.$name)) {
+             $ret_names[] = $name;
+         }
+@@ -1501,7 +1501,7 @@ function feedback_load_feedback_items_options() {
+ 
+     $feedback_options = array("pagebreak" => get_string('add_pagebreak', 'feedback'));
+ 
+-    if (!$feedback_names = feedback_load_feedback_items('mod/feedback/item')) {
++    if (!$feedback_names = feedback_load_feedback_items('item')) {
+         return array();
+     }
+ 

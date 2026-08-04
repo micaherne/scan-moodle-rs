@@ -1,0 +1,13 @@
+diff --git a/public/install.php b/public/install.php
+index 3077fb2..6ff93e7 100644
+--- a/public/install.php
++++ b/public/install.php
+@@ -344,7 +344,7 @@ if ($config->stage == INSTALL_DOWNLOADLANG) {
+         $config->stage = INSTALL_PATHS;
+     }
+ 
+-    if ($config->admin === '' or !file_exists($CFG->dirroot.'/'.$config->admin.'/environment.xml')) {
++    if ($config->admin === '' or !file_exists(\core\component::from_mono_path('/'.$config->admin.'/environment.xml'))) {
+         $hint_admindir = get_string('pathswrongadmindir', 'install');
+         $config->stage = INSTALL_PATHS;
+     }

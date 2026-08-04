@@ -1,0 +1,13 @@
+diff --git a/public/lib/jssourcemap.php b/public/lib/jssourcemap.php
+index 1b07acf9c8d..c62bcc8391a 100644
+--- a/public/lib/jssourcemap.php
++++ b/public/lib/jssourcemap.php
+@@ -55,7 +55,7 @@ if (file_exists($mapfile)) {
+     $mapdata = file_get_contents($mapfile);
+     $mapdata = json_decode($mapdata, true);
+ 
+-    $shortfilename = str_replace($CFG->dirroot, '', $jsfile);
++    $shortfilename = \core\component::to_mono_path($jsfile, leadingslash: true);
+     $srcfilename = str_replace('/amd/build/', '/amd/src/', $shortfilename);
+     $srcfilename = str_replace('.min.js', '.js', $srcfilename);
+     $fullsrcfilename = $CFG->wwwroot . $srcfilename;

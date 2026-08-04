@@ -19,6 +19,8 @@ use scan_moodle::moodle::entrypoints::{self, EntrypointKind};
 use scan_moodle::moodle::resolver::ComponentResolver;
 use scan_moodle::moodle::thirdparty;
 use scan_moodle::path_finder::{PathNotation, PathResult, find_paths};
+#[cfg(feature = "rewrite")]
+use scan_moodle::rewrite;
 
 /// Byte-order mark that hints to Excel that the CSV that follows is UTF-8.
 const UTF8_BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
@@ -73,6 +75,9 @@ enum Commands {
         #[arg(long = "bootstrap-only")]
         bootstrap_only: bool,
     },
+    /// Rewrite a Moodle codebase (only available when the `rewrite` feature is enabled)
+    #[cfg(feature = "rewrite")]
+    RewriteMoodle,
 }
 
 /// Builds a CSV writer with a UTF-8 BOM and CRLF line terminator for Excel compatibility,
@@ -178,6 +183,11 @@ fn main() -> ExitCode {
             output_file,
             bootstrap_only,
         } => find_entrypoints_command(&root, output_file.as_deref(), bootstrap_only),
+        #[cfg(feature = "rewrite")]
+        Commands::RewriteMoodle => {
+            rewrite::run();
+            ExitCode::SUCCESS
+        }
     }
 }
 

@@ -1,0 +1,18 @@
+diff --git a/public/theme/styles.php b/public/theme/styles.php
+index 4a3239aa38e..dda8b69805a 100644
+--- a/public/theme/styles.php
++++ b/public/theme/styles.php
+@@ -78,10 +78,9 @@ if (!in_array($type, ['all', 'all-rtl', 'editor', 'editor-rtl'])) {
+     css_send_css_not_found();
+ }
+ 
+-if (file_exists("$CFG->dirroot/theme/$themename/config.php")) {
+-    // The theme exists in standard location - ok.
+-} else if (!empty($CFG->themedir) and file_exists("$CFG->themedir/$themename/config.php")) {
+-    // Alternative theme location contains this theme - ok.
++$themedir = \core_component::get_plugin_directory('theme', $themename);
++if ($themedir && file_exists("$themedir/config.php")) {
++    // The theme exists - ok.
+ } else {
+     header('HTTP/1.0 404 not found');
+     die('Theme was not found, sorry.');

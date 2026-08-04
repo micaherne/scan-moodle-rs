@@ -1,0 +1,16 @@
+diff --git a/public/mod/assign/assignmentplugin.php b/public/mod/assign/assignmentplugin.php
+index fb78ef13b6b..9a75448b8ee 100644
+--- a/public/mod/assign/assignmentplugin.php
++++ b/public/mod/assign/assignmentplugin.php
+@@ -318,10 +318,7 @@ abstract class assign_plugin {
+      * @return bool
+      */
+     final public function has_admin_settings() {
+-        global $CFG;
+-
+-        $pluginroot = $CFG->dirroot . '/mod/assign/' . substr($this->get_subtype(), strlen('assign')) . '/' . $this->get_type();
+-        $settingsfile = $pluginroot . '/settings.php';
++        $settingsfile = \core\component::component_path($this->get_subtype() . '_' . $this->get_type(), 'settings.php');
+         return file_exists($settingsfile);
+     }
+ 

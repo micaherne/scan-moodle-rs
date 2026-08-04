@@ -1,0 +1,13 @@
+diff --git a/public/mod/scorm/tests/generator/lib.php b/public/mod/scorm/tests/generator/lib.php
+index 9a184bda4f8..70ba58a2433 100644
+--- a/public/mod/scorm/tests/generator/lib.php
++++ b/public/mod/scorm/tests/generator/lib.php
+@@ -79,7 +79,7 @@ class mod_scorm_generator extends testing_module_generator {
+         if (empty($record['packagefilepath'])) {
+             $record['packagefilepath'] = $CFG->dirroot.'/mod/scorm/tests/packages/singlescobasic.zip';
+         }
+-        if (strpos($record['packagefilepath'], $CFG->dirroot) !== 0) {
++        if (!\core\component::is_inside_codebase($record['packagefilepath'], '')) {
+             $record['packagefilepath'] = "{$CFG->dirroot}/{$record['packagefilepath']}";
+         }
+ 

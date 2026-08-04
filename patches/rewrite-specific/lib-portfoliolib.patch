@@ -1,0 +1,21 @@
+diff --git a/public/lib/portfoliolib.php b/public/lib/portfoliolib.php
+index 2769d2080ac..f4afc8a1cab 100644
+--- a/public/lib/portfoliolib.php
++++ b/public/lib/portfoliolib.php
+@@ -1267,7 +1267,6 @@ function portfolio_rewrite_pluginfile_url_callback($contextid, $component, $file
+  *     other locations must use something unique
+  */
+ function portfolio_include_callback_file($component, $class = null) {
+-    global $CFG;
+     require_once($CFG->libdir . '/adminlib.php');
+ 
+     // It's possible that they are passing a file path rather than passing a component.
+@@ -1283,7 +1282,7 @@ function portfolio_include_callback_file($component, $class = null) {
+         // Go through the plugin types.
+         foreach ($plugintypes as $type => $path) {
+             // Getting the path relative to the dirroot.
+-            $path = preg_replace('|^' . preg_quote($CFG->dirroot, '|') . '/|', '', $path);
++            $path = \core\component::to_mono_path($path, leadingslash: false);
+             if (strrpos($component, $path) === 0) {
+                 // Found the plugin type.
+                 $isvalid = true;

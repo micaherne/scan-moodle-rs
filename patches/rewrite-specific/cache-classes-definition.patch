@@ -1,0 +1,22 @@
+diff --git a/public/cache/classes/definition.php b/public/cache/classes/definition.php
+index 1fb7f12..2f9293a 100644
+--- a/public/cache/classes/definition.php
++++ b/public/cache/classes/definition.php
+@@ -458,7 +458,7 @@ class definition {
+ 
+         if (!is_null($overrideclass)) {
+             if (!is_null($overrideclassfile)) {
+-                if (strpos($overrideclassfile, $CFG->dirroot) !== 0) {
++                if (!\core\component::is_inside_codebase($overrideclassfile)) {
+                     $overrideclassfile = $CFG->dirroot . '/' . $overrideclassfile;
+                 }
+                 if (strpos($overrideclassfile, '../') !== false) {
+@@ -481,7 +481,7 @@ class definition {
+ 
+         if (!is_null($datasource)) {
+             if (!is_null($datasourcefile)) {
+-                if (strpos($datasourcefile, $CFG->dirroot) !== 0) {
++                if (!\core\component::is_inside_codebase($datasourcefile)) {
+                     $datasourcefile = $CFG->dirroot . '/' . $datasourcefile;
+                 }
+                 if (strpos($datasourcefile, '../') !== false) {

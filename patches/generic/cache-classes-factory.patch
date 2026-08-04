@@ -1,0 +1,25 @@
+diff --git a/public/cache/classes/factory.php b/public/cache/classes/factory.php
+index 0cdf1993863..345efacb913 100644
+--- a/public/cache/classes/factory.php
++++ b/public/cache/classes/factory.php
+@@ -482,7 +482,7 @@ class factory {
+      * @return lockable_cache_interface
+      */
+     public function create_lock_instance(array $config) {
+-        global $CFG;
++        global $CFG; // Needed in scope for the required lock lib.php.
+         if (!array_key_exists('name', $config) || !array_key_exists('type', $config)) {
+             throw new coding_exception('Invalid cache lock instance provided');
+         }
+@@ -493,8 +493,9 @@ class factory {
+ 
+         if (!isset($this->lockplugins[$type])) {
+             $pluginname = substr($type, 10);
+-            $file = $CFG->dirroot . "/cache/locks/{$pluginname}/lib.php";
+-            if (file_exists($file) && is_readable($file)) {
++            $plugindir = \core_component::get_plugin_directory('cachelock', $pluginname);
++            $file = $plugindir ? "$plugindir/lib.php" : null;
++            if ($file !== null && file_exists($file) && is_readable($file)) {
+                 require_once($file);
+             }
+             if (!class_exists($type)) {

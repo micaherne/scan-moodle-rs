@@ -1,0 +1,16 @@
+diff --git a/public/repository/repository_callback.php b/public/repository/repository_callback.php
+index 5cc9e64724d..8097e1a7712 100644
+--- a/public/repository/repository_callback.php
++++ b/public/repository/repository_callback.php
+@@ -50,8 +50,9 @@ $repository = $DB->get_record_sql($sql, array($repo_id), '*', MUST_EXIST);
+ 
+ $type = $repository->type;
+ 
+-if (file_exists($CFG->dirroot.'/repository/'.$type.'/lib.php')) {
+-    require_once($CFG->dirroot.'/repository/'.$type.'/lib.php');
++$repodir = \core_component::get_plugin_directory('repository', $type);
++if ($repodir && file_exists($repodir.'/lib.php')) {
++    require_once($repodir.'/lib.php');
+     $classname = 'repository_' . $type;
+     $repo = new $classname($repo_id, $repository->contextid, array('type'=>$type));
+ } else {

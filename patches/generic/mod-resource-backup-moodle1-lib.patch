@@ -1,0 +1,16 @@
+diff --git a/public/mod/resource/backup/moodle1/lib.php b/public/mod/resource/backup/moodle1/lib.php
+index 2c9498dd2d3..c6ad44de33b 100644
+--- a/public/mod/resource/backup/moodle1/lib.php
++++ b/public/mod/resource/backup/moodle1/lib.php
+@@ -115,7 +115,10 @@ class moodle1_mod_resource_handler extends moodle1_mod_handler {
+             $plugin = new stdClass();
+             $plugin->version = null;
+             $module = $plugin;
+-            include $CFG->dirroot.'/mod/'.$successor->get_modname().'/version.php';
++            $moddir = \core_component::get_plugin_directory('mod', $successor->get_modname());
++            if ($moddir) {
++                include "$moddir/version.php";
++            }
+             $cminfo['version'] = $plugin->version;
+ 
+             // stash the new course module information for this successor

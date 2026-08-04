@@ -1,0 +1,20 @@
+diff --git a/public/grade/lib.php b/public/grade/lib.php
+index f29b6fc05b0..0734fda3024 100644
+--- a/public/grade/lib.php
++++ b/public/grade/lib.php
+@@ -1347,13 +1347,12 @@ class grade_plugin_return {
+  * @return string
+  */
+ function grade_build_nav($path, $pagename=null, $id=null) {
+-    global $CFG, $COURSE, $PAGE;
++    global $COURSE, $PAGE;
+ 
+     $strgrades = get_string('grades', 'grades');
+ 
+     // Parse the path and build navlinks from its elements
+-    $dirroot_length = strlen($CFG->dirroot) + 1; // Add 1 for the first slash
+-    $path = substr($path, $dirroot_length);
++    $path = \core\component::to_mono_path($path, leadingslash: false);
+     $path = str_replace('\\', '/', $path);
+ 
+     $path_elements = explode('/', $path);

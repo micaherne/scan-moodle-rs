@@ -1,0 +1,15 @@
+diff --git a/public/lib/tests/theme_config_test.php b/public/lib/tests/theme_config_test.php
+index 9c375ce..7acdcd9 100644
+--- a/public/lib/tests/theme_config_test.php
++++ b/public/lib/tests/theme_config_test.php
+@@ -187,6 +187,10 @@ final class theme_config_test extends advanced_testcase {
+ 
+         $this->resetAfterTest();
+         $CFG->themedir = $CFG->dirroot . '/lib/tests/fixtures/themes/';
++        // The component cache is built once per process (before $CFG->themedir is set
++        // here), and theme locations are now resolved through core_component. Reset it
++        // so the themes under the just-set themedir are picked up.
++        \core_component::reset();
+         $theme = theme_config::load('child');
+         $layout = $theme->layouts['frontpage']; // This is missing in the config.php of the child theme, so we expect
+         // it to be inherited from the parent theme.

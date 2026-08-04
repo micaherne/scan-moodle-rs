@@ -1,0 +1,13 @@
+diff --git a/public/lib/moodlelib.php b/public/lib/moodlelib.php
+index 0fe57d53a3a..54007c5fdbe 100644
+--- a/public/lib/moodlelib.php
++++ b/public/lib/moodlelib.php
+@@ -5734,7 +5734,7 @@ function email_to_user($user, $from, $subject, $messagetext, $messagehtml = '',
+         }
+ 
+         $originheader = $CFG->wwwroot . ' => ' . gethostname() . ':'
+-             . str_replace($CFG->dirroot . '/', '', $origin['file']) . ':' . $origin['line'];
++             . \core\component::to_mono_path($origin['file'], leadingslash: false) . ':' . $origin['line'];
+         $mail->addCustomHeader('X-Moodle-Originating-Script: ' . $originheader);
+     }
+ 

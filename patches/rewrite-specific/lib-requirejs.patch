@@ -1,0 +1,12 @@
+diff --git a/public/lib/requirejs.php b/public/lib/requirejs.php
+index 5460d29f798..1851fd310be 100644
+--- a/public/lib/requirejs.php
++++ b/public/lib/requirejs.php
+@@ -163,7 +163,6 @@ $jsfiles = core_requirejs::find_one_amd_module($component, $module);
+ if (!empty($jsfiles)) {
+     $modulename = array_keys($jsfiles)[0];
+     $jsfile = $jsfiles[$modulename];
+-    $shortfilename = str_replace($CFG->dirroot, '', $jsfile);
+     $mapfile = $jsfile . '.map';
+ 
+     if (file_exists($mapfile)) {

@@ -1,0 +1,24 @@
+diff --git a/public/admin/tool/componentlibrary/docspage.php b/public/admin/tool/componentlibrary/docspage.php
+index 6285826..b87d90f 100644
+--- a/public/admin/tool/componentlibrary/docspage.php
++++ b/public/admin/tool/componentlibrary/docspage.php
+@@ -51,18 +51,7 @@ $validroots = [
+ ];
+ 
+ if (in_array($docs, $validroots)) {
+-    $docspage = implode(
+-        '/',
+-        [
+-            $CFG->dirroot,
+-            $docsdir,
+-            $docs,
+-            $folder,
+-            $section,
+-            'index.html',
+-
+-        ]
+-    );
++    $docspage = \core\component::component_path('tool_componentlibrary', "docs/$docs/$folder/$section/index.html");
+ }
+ 
+ $thispageurl = new moodle_url('/admin/tool/componentlibrary/docspage.php');

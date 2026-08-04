@@ -1,0 +1,15 @@
+diff --git a/public/mod/forum/classes/subscriber_selector_base.php b/public/mod/forum/classes/subscriber_selector_base.php
+index 45da3b3b18a..1c7ad40c452 100644
+--- a/public/mod/forum/classes/subscriber_selector_base.php
++++ b/public/mod/forum/classes/subscriber_selector_base.php
+@@ -75,9 +75,8 @@ abstract class mod_forum_subscriber_selector_base extends user_selector_base {
+      * @return array
+      */
+     protected function get_options() {
+-        global $CFG;
+         $options = parent::get_options();
+-        $options['file'] =  substr(__FILE__, strlen($CFG->dirroot.'/'));
++        $options['file'] = \core\component::to_mono_path(__FILE__, leadingslash: false);
+         $options['context'] = $this->context;
+         $options['currentgroup'] = $this->currentgroup;
+         $options['forumid'] = $this->forumid;
