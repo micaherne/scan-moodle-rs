@@ -1,24 +1,17 @@
-use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use clap::{Parser, Subcommand};
 use csv::WriterBuilder;
 use rayon::prelude::*;
-use walkdir::WalkDir;
 
 use scan_moodle::moodle;
-use scan_moodle::moodle::categorise;
-use scan_moodle::moodle::components::discover_components;
-use scan_moodle::moodle::entrypoints::{self, EntrypointKind};
+use scan_moodle::moodle::entrypoints::EntrypointKind;
 use scan_moodle::moodle::resolver::ComponentResolver;
-use scan_moodle::moodle::thirdparty;
-use scan_moodle::path_finder::{PathNotation, PathResult, find_paths};
+use scan_moodle::moodle::scan::{Scan, categorise_all};
 #[cfg(feature = "rewrite")]
 use scan_moodle::rewrite;
 
@@ -75,9 +68,15 @@ enum Commands {
         #[arg(long = "bootstrap-only")]
         bootstrap_only: bool,
     },
-    /// Rewrite a Moodle codebase (only available when the `rewrite` feature is enabled)
+    /// Rewrite a Moodle codebase (only available when the `rewrite` feature is enabled).
+    ///
+    /// Currently only applies the embedded patches to `root` and stops there — the rest of the
+    /// process (see REWRITE_SPEC.md) isn't wired up yet.
     #[cfg(feature = "rewrite")]
-    RewriteMoodle,
+    RewriteMoodle {
+        /// Path to the Moodle codebase to patch
+        root: PathBuf,
+    },
 }
 
 /// Builds a CSV writer with a UTF-8 BOM and CRLF line terminator for Excel compatibility,
@@ -116,7 +115,7 @@ fn discover_or_exit(root: &Path) -> Result<moodle::components::ComponentDiscover
         eprintln!("error: {} is not a directory", root.display());
         return Err(ExitCode::FAILURE);
     }
-    discover_components(root).map_err(|err| {
+    moodle::components::discover_components(root).map_err(|err| {
         eprintln!("error: failed to discover components: {err}");
         ExitCode::FAILURE
     })
@@ -125,16 +124,6 @@ fn discover_or_exit(root: &Path) -> Result<moodle::components::ComponentDiscover
 /// `Some(value)` as its string form, `None` as an empty string.
 fn opt_to_string<T: ToString>(value: Option<T>) -> String {
     value.map(|v| v.to_string()).unwrap_or_default()
-}
-
-/// `path`, relative to `root`, as a forward-slash-separated string.
-fn relative_unix_path(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .components()
-        .map(|component| component.as_os_str().to_string_lossy().into_owned())
-        .collect::<Vec<_>>()
-        .join("/")
 }
 
 /// Collapses a field onto a single line so each CSV record stays one row in Excel.
@@ -184,34 +173,8 @@ fn main() -> ExitCode {
             bootstrap_only,
         } => find_entrypoints_command(&root, output_file.as_deref(), bootstrap_only),
         #[cfg(feature = "rewrite")]
-        Commands::RewriteMoodle => {
-            rewrite::run();
-            ExitCode::SUCCESS
-        }
+        Commands::RewriteMoodle { root } => rewrite::run(&root),
     }
-}
-
-/// Every PHP file eligible for path-finding analysis, filtered identically for every command that
-/// scans one: third-party vendored code, and anything [`moodle::is_excluded_from_scan`] rules out
-/// (e.g. 'config-dist.php', a template that is never real code).
-fn php_paths<'a>(
-    root: &'a Path,
-    thirdparty_locations: &'a HashSet<String>,
-) -> impl ParallelIterator<Item = PathBuf> + 'a {
-    WalkDir::new(root)
-        .into_iter()
-        .filter_entry(|entry| {
-            !thirdparty::is_thirdparty(
-                thirdparty_locations,
-                &relative_unix_path(root, entry.path()),
-            )
-        })
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.file_type().is_file())
-        .map(|entry| entry.into_path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "php"))
-        .filter(move |path| !moodle::is_excluded_from_scan(&relative_unix_path(root, path)))
-        .par_bridge()
 }
 
 fn find_paths_command(
@@ -225,55 +188,15 @@ fn find_paths_command(
         Err(code) => return code,
     };
 
-    let notation = PathNotation::from_root(root);
-    let thirdparty_locations = thirdparty::find_thirdparty_locations(root, &discovered);
-    let dirroot = moodle::dirroot_prefix(root).trim_end_matches('/');
-
     // --categorise needs source_component/target_component to decide same-vs-different-component
     // and dynamic-component/dirroot-wrangling/root-wrangling categories, so it implies
     // --resolve-components' columns.
     let resolve_components = resolve_components || categorise;
-    let resolver = resolve_components.then(|| ComponentResolver::new(&discovered));
 
-    let failed = AtomicUsize::new(0);
     let start = Instant::now();
-
-    // Every file's results are collected up front, rather than streamed straight to output as
-    // find-paths alone does not need to: --categorise needs the whole codebase's require/include
-    // graph before it can categorise even a single reference (see entrypoints::classify), the same
-    // reason find-entrypoints does this.
-    let files: Vec<(String, Vec<PathResult>)> = php_paths(root, &thirdparty_locations)
-        .filter_map(|path| {
-            let relative = relative_unix_path(root, &path);
-            let bytes = match std::fs::read(&path) {
-                Ok(bytes) => bytes,
-                Err(err) => {
-                    eprintln!("warning: failed to read {}: {err}", path.display());
-                    failed.fetch_add(1, Ordering::Relaxed);
-                    return None;
-                }
-            };
-            let source = String::from_utf8_lossy(&bytes);
-            let results = find_paths(&source, &relative, &notation);
-            Some((relative, results))
-        })
-        .collect();
-
-    let scanned = files.len();
-    let found: usize = files.iter().map(|(_, results)| results.len()).sum();
-
-    // The small set of bootstrap files, and the line within each before which it has no possible
-    // access to core\component yet (see entrypoints::classify's `bootstrap_only` mode) — the input
-    // categorise::categorise needs for its PreComponent category.
-    let config_locations = categorise.then(|| entrypoints::config_locations(&notation));
-    let boundary_lines: Option<HashMap<String, u32>> = categorise.then(|| {
-        entrypoints::classify(&files, &notation, true)
-            .into_iter()
-            .filter_map(|classification| classification.line.map(|line| (classification.file, line)))
-            .collect()
-    });
-    let plugin_type_roots: Option<HashSet<String>> =
-        categorise.then(|| discovered.plugin_types.values().cloned().collect());
+    let scan = Scan::from_discovery(root, discovered);
+    let scanned = scan.files.len();
+    let found: usize = scan.files.iter().map(|(_, results)| results.len()).sum();
 
     let mut header = vec![
         "file",
@@ -291,31 +214,67 @@ fn find_paths_command(
     if categorise {
         header.push("category");
     }
-    let csv_writer = match create_csv_writer(output_file, &header) {
+    let mut csv_writer = match create_csv_writer(output_file, &header) {
         Ok(writer) => writer,
         Err(code) => return code,
     };
 
-    let out = Mutex::new(csv_writer);
-
-    files.par_iter().for_each(|(relative, results)| {
-        if results.is_empty() {
-            return;
+    if categorise {
+        // categorise_all resolves components and categorises every reference up front, in
+        // parallel across rayon's worker threads, so only the (inherently serial) CSV write
+        // happens on this thread.
+        let dirroot = moodle::dirroot_prefix(root).trim_end_matches('/');
+        for reference in categorise_all(&scan, dirroot) {
+            let record = vec![
+                sanitize(&reference.file),
+                reference.result.line.to_string(),
+                opt_to_string(reference.result.start_pos),
+                opt_to_string(reference.result.end_pos),
+                sanitize(&reference.result.code),
+                reference.result.kind.to_string(),
+                sanitize(&reference.result.path),
+                sanitize(&reference.result.real_path),
+                reference.source_component.unwrap_or_default(),
+                reference.target.as_ref().map(|t| t.component.clone()).unwrap_or_default(),
+                reference.target.map(|t| t.path_in_component).unwrap_or_default(),
+                reference.category.to_string(),
+            ];
+            csv_writer.write_record(record).ok();
         }
-
-        // The source file is a real path on disk, so it always has a well-defined component
-        // (if any) and no meaningful sub-path within it.
-        let source_component = resolver.as_ref().and_then(|resolver| resolver.resolve(relative)).map(|r| r.component);
-        let file_boundary_line = boundary_lines.as_ref().and_then(|lines| lines.get(relative).copied());
-
-        // Build every record up front so only the actual write is serialized on `out`;
-        // sanitizing, resolving components and categorising are pure computation and should run
-        // fully in parallel across the rayon worker threads.
-        let records: Vec<Vec<String>> = results
-            .iter()
-            .map(|result| {
-                let mut record = vec![
-                    sanitize(relative),
+    } else if resolve_components {
+        let resolver = ComponentResolver::new(&scan.discovered);
+        let records: Vec<Vec<String>> = scan
+            .files
+            .par_iter()
+            .flat_map_iter(|(file, results)| {
+                let source_component = resolver.resolve(file).map(|r| r.component);
+                let resolver = &resolver;
+                results.iter().map(move |result| {
+                    let target = resolver.resolve(&result.real_path);
+                    vec![
+                        sanitize(file),
+                        result.line.to_string(),
+                        opt_to_string(result.start_pos),
+                        opt_to_string(result.end_pos),
+                        sanitize(&result.code),
+                        result.kind.to_string(),
+                        sanitize(&result.path),
+                        sanitize(&result.real_path),
+                        source_component.clone().unwrap_or_default(),
+                        target.as_ref().map(|t| t.component.clone()).unwrap_or_default(),
+                        target.map(|t| t.path_in_component).unwrap_or_default(),
+                    ]
+                })
+            })
+            .collect();
+        for record in records {
+            csv_writer.write_record(record).ok();
+        }
+    } else {
+        for (file, results) in &scan.files {
+            for result in results {
+                let record = vec![
+                    sanitize(file),
                     result.line.to_string(),
                     opt_to_string(result.start_pos),
                     opt_to_string(result.end_pos),
@@ -324,46 +283,17 @@ fn find_paths_command(
                     sanitize(&result.path),
                     sanitize(&result.real_path),
                 ];
-                let target = resolver.as_ref().and_then(|resolver| resolver.resolve(&result.real_path));
-                if resolve_components {
-                    record.push(source_component.clone().unwrap_or_default());
-                    record.push(
-                        target
-                            .as_ref()
-                            .map(|r| r.component.clone())
-                            .unwrap_or_default(),
-                    );
-                    record.push(target.as_ref().map(|r| r.path_in_component.clone()).unwrap_or_default());
-                }
-                if categorise {
-                    let category = categorise::categorise(
-                        result,
-                        config_locations.as_ref().expect("categorise implies config_locations is set"),
-                        file_boundary_line,
-                        plugin_type_roots.as_ref().expect("categorise implies plugin_type_roots is set"),
-                        source_component.as_deref(),
-                        target.as_ref(),
-                        dirroot,
-                    );
-                    record.push(category.to_string());
-                }
-                record
-            })
-            .collect();
-
-        let mut out = out.lock().unwrap();
-        for record in records {
-            out.write_record(record).ok();
+                csv_writer.write_record(record).ok();
+            }
         }
-    });
+    }
 
-    out.into_inner().unwrap().flush().ok();
+    csv_writer.flush().ok();
     let elapsed = start.elapsed();
 
     eprintln!("Scanned {scanned} PHP files in {elapsed:.2?}, found {found} paths");
-    let failed = failed.load(Ordering::Relaxed);
-    if failed > 0 {
-        eprintln!("Failed to read {failed} files");
+    if scan.failed_reads > 0 {
+        eprintln!("Failed to read {} files", scan.failed_reads);
     }
 
     ExitCode::SUCCESS
@@ -426,34 +356,14 @@ fn find_entrypoints_command(
         Err(code) => return code,
     };
 
-    let notation = PathNotation::from_root(root);
-    let thirdparty_locations = thirdparty::find_thirdparty_locations(root, &discovered);
-
-    let failed = AtomicUsize::new(0);
     let start = Instant::now();
 
     // Unlike find-paths, this needs every file's results in memory at once, since the
     // bootstrap/entry-point closures are graph reachability queries over the whole codebase, not
     // a per-file computation that can be streamed out as it's found.
-    let files: Vec<(String, Vec<PathResult>)> = php_paths(root, &thirdparty_locations)
-        .filter_map(|path| {
-            let relative = relative_unix_path(root, &path);
-            let bytes = match std::fs::read(&path) {
-                Ok(bytes) => bytes,
-                Err(err) => {
-                    eprintln!("warning: failed to read {}: {err}", path.display());
-                    failed.fetch_add(1, Ordering::Relaxed);
-                    return None;
-                }
-            };
-            let source = String::from_utf8_lossy(&bytes);
-            let results = find_paths(&source, &relative, &notation);
-            Some((relative, results))
-        })
-        .collect();
-
-    let scanned = files.len();
-    let classifications = entrypoints::classify(&files, &notation, bootstrap_only);
+    let scan = Scan::from_discovery(root, discovered);
+    let scanned = scan.files.len();
+    let classifications = moodle::entrypoints::classify(&scan.files, &scan.notation, bootstrap_only);
 
     let mut csv_writer = match create_csv_writer(output_file, &["file", "kind", "line"]) {
         Ok(writer) => writer,
@@ -485,9 +395,8 @@ fn find_entrypoints_command(
             bootstrap_only
         )
     );
-    let failed = failed.load(Ordering::Relaxed);
-    if failed > 0 {
-        eprintln!("Failed to read {failed} files");
+    if scan.failed_reads > 0 {
+        eprintln!("Failed to read {} files", scan.failed_reads);
     }
 
     ExitCode::SUCCESS

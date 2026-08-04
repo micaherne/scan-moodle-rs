@@ -6,6 +6,7 @@ pub mod categorise;
 pub mod components;
 pub mod entrypoints;
 pub mod resolver;
+pub mod scan;
 pub mod thirdparty;
 
 /// The path from the repository root to $CFG->dirroot, with a trailing slash (e.g. 'public/'),
