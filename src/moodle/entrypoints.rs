@@ -102,12 +102,32 @@ pub struct FileClassification {
 /// scanning it. Used both to seed the entry-point search in [`classify`] and, standalone, by
 /// [`crate::moodle::categorise`] to recognise a reference that targets config.php itself.
 pub fn config_locations(notation: &PathNotation) -> HashSet<String> {
-    HashSet::from([dirroot_relative(notation, "config.php"), "config.php".to_string()])
+    HashSet::from([
+        dirroot_relative(notation, "config.php"),
+        "config.php".to_string(),
+    ])
+}
+
+/// The repository-root-relative paths of `core\component`'s own source file and its unit test —
+/// Moodle's original, monolithic implementation of component/path resolution, which the patches
+/// applied in step 1 of the rewrite process add `component_path()`/`from_mono_path()` to. Every
+/// rewrite this project produces ultimately calls into that code at run time, so it must never be
+/// rewritten itself. Used standalone by [`crate::moodle::categorise`] to recognise a reference that
+/// appears in either file, regardless of what it targets.
+pub fn component_locations(notation: &PathNotation) -> HashSet<String> {
+    HashSet::from([
+        dirroot_relative(notation, "lib/classes/component.php"),
+        dirroot_relative(notation, "lib/tests/component_test.php"),
+    ])
 }
 
 /// Classifies every file in `files` — the codebase-wide output of [`crate::path_finder::find_paths`],
 /// as `(file, that file's results)` pairs — as an entry point or a bootstrap file.
-pub fn classify(files: &[(String, Vec<PathResult>)], notation: &PathNotation, bootstrap_only: bool) -> Vec<FileClassification> {
+pub fn classify(
+    files: &[(String, Vec<PathResult>)],
+    notation: &PathNotation,
+    bootstrap_only: bool,
+) -> Vec<FileClassification> {
     let mut forward = build_forward_edges(files);
 
     let component_php = dirroot_relative(notation, "lib/classes/component.php");
@@ -116,7 +136,12 @@ pub fn classify(files: &[(String, Vec<PathResult>)], notation: &PathNotation, bo
     let setup_php_root = "lib/setup.php".to_string();
 
     if !bootstrap_only {
-        add_synthetic_config_chain(&mut forward, &config_php_public, &config_php_root, &setup_php_root);
+        add_synthetic_config_chain(
+            &mut forward,
+            &config_php_public,
+            &config_php_root,
+            &setup_php_root,
+        );
     }
 
     let reverse = build_reverse_edges(&forward);
@@ -125,8 +150,10 @@ pub fn classify(files: &[(String, Vec<PathResult>)], notation: &PathNotation, bo
     // are excluded from the reported set; only files reverse-reachable *from* them (i.e. that
     // actually require one of them, directly or transitively) count.
     let config_seeds = config_locations(notation);
-    let entrypoints: HashSet<String> =
-        reverse_closure(config_seeds.iter().cloned(), &reverse).into_iter().filter(|file| !config_seeds.contains(file)).collect();
+    let entrypoints: HashSet<String> = reverse_closure(config_seeds.iter().cloned(), &reverse)
+        .into_iter()
+        .filter(|file| !config_seeds.contains(file))
+        .collect();
     let bootstrap = reverse_closure([component_php], &reverse);
 
     let real_files: HashSet<&str> = files.iter().map(|(file, _)| file.as_str()).collect();
@@ -144,11 +171,19 @@ pub fn classify(files: &[(String, Vec<PathResult>)], notation: &PathNotation, bo
         // point, and unlike the general entry-point/bootstrap precedence below, it is not
         // suppressed by `bootstrap_only`: it comes entirely from real edges.
         if let Some(line) = bootstrap_boundary_for_pre_config_work(file, &forward, &config_seeds) {
-            classifications.push(FileClassification { file: file.clone(), kind: EntrypointKind::Bootstrap, line: Some(line) });
+            classifications.push(FileClassification {
+                file: file.clone(),
+                kind: EntrypointKind::Bootstrap,
+                line: Some(line),
+            });
         } else if !bootstrap_only {
             classifications.push(FileClassification {
                 file: file.clone(),
-                kind: if is_cli_path(file) { EntrypointKind::Cli } else { EntrypointKind::Page },
+                kind: if is_cli_path(file) {
+                    EntrypointKind::Cli
+                } else {
+                    EntrypointKind::Page
+                },
                 line: None,
             });
         }
@@ -178,7 +213,9 @@ pub fn classify(files: &[(String, Vec<PathResult>)], notation: &PathNotation, bo
 /// directly from `notation`'s dirroot segment rather than through glyph notation — glyph ('@'/'#')
 /// is purely a human-facing rendering and must not be parsed back for program logic.
 fn dirroot_relative(notation: &PathNotation, suffix: &str) -> String {
-    format!("{}/{suffix}", notation.dirroot_segment()).trim_start_matches('/').to_string()
+    format!("{}/{suffix}", notation.dirroot_segment())
+        .trim_start_matches('/')
+        .to_string()
 }
 
 /// Neither hop below is discoverable by scanning: config.php never exists in a bare checkout (a
@@ -197,17 +234,30 @@ fn add_synthetic_config_chain(
     // On a pre-5.1 layout (no public/ split) these coincide, and the edge below would be a
     // meaningless self-loop.
     if config_php_public != config_php_root {
-        forward.entry(config_php_public.to_string()).or_default().push((config_php_root.to_string(), None));
+        forward
+            .entry(config_php_public.to_string())
+            .or_default()
+            .push((config_php_root.to_string(), None));
     }
-    forward.entry(config_php_root.to_string()).or_default().push((setup_php_root.to_string(), None));
+    forward
+        .entry(config_php_root.to_string())
+        .or_default()
+        .push((setup_php_root.to_string(), None));
 }
 
 fn build_forward_edges(files: &[(String, Vec<PathResult>)]) -> ForwardEdges {
     let mut forward: ForwardEdges = HashMap::new();
     for (file, results) in files {
         for result in results {
-            if result.parent.as_deref().is_some_and(|parent| REQUIRE_LIKE.contains(&parent)) {
-                forward.entry(file.clone()).or_default().push((result.real_path.clone(), Some(result.line)));
+            if result
+                .parent
+                .as_deref()
+                .is_some_and(|parent| REQUIRE_LIKE.contains(&parent))
+            {
+                forward
+                    .entry(file.clone())
+                    .or_default()
+                    .push((result.real_path.clone(), Some(result.line)));
             }
         }
     }
@@ -218,14 +268,20 @@ fn build_reverse_edges(forward: &ForwardEdges) -> ReverseEdges {
     let mut reverse: ReverseEdges = HashMap::new();
     for (source, edges) in forward {
         for (target, _) in edges {
-            reverse.entry(target.clone()).or_default().push(source.clone());
+            reverse
+                .entry(target.clone())
+                .or_default()
+                .push(source.clone());
         }
     }
     reverse
 }
 
 /// Every file that reaches one of `seeds` by requiring/including it, directly or transitively.
-fn reverse_closure(seeds: impl IntoIterator<Item = String>, reverse: &ReverseEdges) -> HashSet<String> {
+fn reverse_closure(
+    seeds: impl IntoIterator<Item = String>,
+    reverse: &ReverseEdges,
+) -> HashSet<String> {
     let mut closure: HashSet<String> = seeds.into_iter().collect();
     let mut queue: Vec<String> = closure.iter().cloned().collect();
     while let Some(target) = queue.pop() {
@@ -252,8 +308,16 @@ fn bootstrap_boundary_for_pre_config_work(
     config_seeds: &HashSet<String>,
 ) -> Option<u32> {
     let edges = forward.get(file)?;
-    let config_line = edges.iter().filter(|(target, _)| config_seeds.contains(target)).filter_map(|(_, line)| *line).min()?;
-    edges.iter().filter_map(|(_, line)| *line).any(|line| line < config_line).then_some(config_line)
+    let config_line = edges
+        .iter()
+        .filter(|(target, _)| config_seeds.contains(target))
+        .filter_map(|(_, line)| *line)
+        .min()?;
+    edges
+        .iter()
+        .filter_map(|(_, line)| *line)
+        .any(|line| line < config_line)
+        .then_some(config_line)
 }
 
 /// The smallest line, among `file`'s own require/include statements, that points at something
@@ -261,7 +325,12 @@ fn bootstrap_boundary_for_pre_config_work(
 /// `None` when every such edge is a synthetic config.php hop (no real line) or `file` is the seed
 /// itself (component.php does not require itself).
 fn anchor_line(file: &str, closure: &HashSet<String>, forward: &ForwardEdges) -> Option<u32> {
-    forward.get(file)?.iter().filter(|(target, _)| closure.contains(target)).filter_map(|(_, line)| *line).min()
+    forward
+        .get(file)?
+        .iter()
+        .filter(|(target, _)| closure.contains(target))
+        .filter_map(|(_, line)| *line)
+        .min()
 }
 
 /// The heuristic stand-in for checking `define('CLI_SCRIPT', true)`: whether any directory
@@ -296,7 +365,14 @@ mod tests {
     #[test]
     fn direct_component_require_is_bootstrap_with_its_line() {
         let files = vec![
-            ("public/lib/setup.php".to_string(), vec![result("public/lib/classes/component.php", Some("require_once"), 442)]),
+            (
+                "public/lib/setup.php".to_string(),
+                vec![result(
+                    "public/lib/classes/component.php",
+                    Some("require_once"),
+                    442,
+                )],
+            ),
             ("public/lib/classes/component.php".to_string(), vec![]),
         ];
         let classifications = classify(&files, &notation(), true);
@@ -308,7 +384,11 @@ mod tests {
                     kind: EntrypointKind::Bootstrap,
                     line: None,
                 },
-                FileClassification { file: "public/lib/setup.php".to_string(), kind: EntrypointKind::Bootstrap, line: Some(442) },
+                FileClassification {
+                    file: "public/lib/setup.php".to_string(),
+                    kind: EntrypointKind::Bootstrap,
+                    line: Some(442)
+                },
             ]
         );
     }
@@ -322,21 +402,38 @@ mod tests {
     #[test]
     fn a_require_nested_in_a_method_does_not_leak_to_a_caller_that_only_uses_the_class() {
         let files = vec![
-            ("public/lib/classes/router/util.php".to_string(), vec![result("public/lib/setup.php", Some("require"), 361)]),
-            ("public/lib/setup.php".to_string(), vec![result("public/lib/classes/component.php", Some("require_once"), 442)]),
+            (
+                "public/lib/classes/router/util.php".to_string(),
+                vec![result("public/lib/setup.php", Some("require"), 361)],
+            ),
+            (
+                "public/lib/setup.php".to_string(),
+                vec![result(
+                    "public/lib/classes/component.php",
+                    Some("require_once"),
+                    442,
+                )],
+            ),
             ("public/lib/classes/component.php".to_string(), vec![]),
             // The caller: no PathResult at all, since `\core\router\util::load_full_moodle();` is a
             // plain method call, not a require/include — find_paths would never emit one for it.
-            ("public/lib/classes/router/middleware/error_handling_middleware.php".to_string(), vec![]),
+            (
+                "public/lib/classes/router/middleware/error_handling_middleware.php".to_string(),
+                vec![],
+            ),
         ];
         let classifications = classify(&files, &notation(), true);
         assert_eq!(
-            classifications.iter().find(|c| c.file == "public/lib/classes/router/util.php").unwrap().kind,
+            classifications
+                .iter()
+                .find(|c| c.file == "public/lib/classes/router/util.php")
+                .unwrap()
+                .kind,
             EntrypointKind::Bootstrap
         );
-        assert!(
-            classifications.iter().all(|c| c.file != "public/lib/classes/router/middleware/error_handling_middleware.php")
-        );
+        assert!(classifications.iter().all(
+            |c| c.file != "public/lib/classes/router/middleware/error_handling_middleware.php"
+        ));
     }
 
     /// public/lib/phpunit/bootstrap.php: two requires before its own config.php require. Neither
@@ -351,7 +448,11 @@ mod tests {
         let files = vec![(
             "public/lib/phpunit/bootstrap.php".to_string(),
             vec![
-                result("public/lib/phpunit/bootstraplib.php", Some("require_once"), 51),
+                result(
+                    "public/lib/phpunit/bootstraplib.php",
+                    Some("require_once"),
+                    51,
+                ),
                 result("public/lib/testing/lib.php", Some("require_once"), 52),
                 result("public/config.php", Some("require"), 86),
             ],
@@ -375,7 +476,11 @@ mod tests {
         let files = vec![(
             "public/lib/phpunit/bootstrap.php".to_string(),
             vec![
-                result("public/lib/phpunit/bootstraplib.php", Some("require_once"), 51),
+                result(
+                    "public/lib/phpunit/bootstraplib.php",
+                    Some("require_once"),
+                    51,
+                ),
                 result("public/config.php", Some("require"), 86),
             ],
         )];
@@ -405,20 +510,44 @@ mod tests {
         let classifications = classify(&files, &notation(), false);
         assert_eq!(
             classifications,
-            vec![FileClassification { file: "public/theme/font.php".to_string(), kind: EntrypointKind::Page, line: None }]
+            vec![FileClassification {
+                file: "public/theme/font.php".to_string(),
+                kind: EntrypointKind::Page,
+                line: None
+            }]
         );
     }
 
     #[test]
     fn transitive_bootstrap_chain_reports_each_files_own_line() {
         let files = vec![
-            ("lib/setup.php".to_string(), vec![result("public/lib/setup.php", Some("require_once"), 29)]),
-            ("public/lib/setup.php".to_string(), vec![result("public/lib/classes/component.php", Some("require_once"), 442)]),
+            (
+                "lib/setup.php".to_string(),
+                vec![result("public/lib/setup.php", Some("require_once"), 29)],
+            ),
+            (
+                "public/lib/setup.php".to_string(),
+                vec![result(
+                    "public/lib/classes/component.php",
+                    Some("require_once"),
+                    442,
+                )],
+            ),
             ("public/lib/classes/component.php".to_string(), vec![]),
         ];
         let classifications = classify(&files, &notation(), true);
-        let lib_setup = classifications.iter().find(|c| c.file == "lib/setup.php").unwrap();
-        assert_eq!(lib_setup, &FileClassification { file: "lib/setup.php".to_string(), kind: EntrypointKind::Bootstrap, line: Some(29) });
+        let lib_setup = classifications
+            .iter()
+            .find(|c| c.file == "lib/setup.php")
+            .unwrap();
+        assert_eq!(
+            lib_setup,
+            &FileClassification {
+                file: "lib/setup.php".to_string(),
+                kind: EntrypointKind::Bootstrap,
+                line: Some(29)
+            }
+        );
     }
 
     /// A path merely mentioned in passing (an existence check, an error message, an array of
@@ -431,29 +560,53 @@ mod tests {
     #[test]
     fn require_passed_as_a_function_argument_is_not_an_edge() {
         let files = vec![
-            ("public/mod/forum/lib.php".to_string(), vec![result("public/lib/classes/component.php", Some("file_exists"), 1)]),
+            (
+                "public/mod/forum/lib.php".to_string(),
+                vec![result(
+                    "public/lib/classes/component.php",
+                    Some("file_exists"),
+                    1,
+                )],
+            ),
             ("public/lib/classes/component.php".to_string(), vec![]),
         ];
         let classifications = classify(&files, &notation(), true);
-        assert!(classifications.iter().all(|c| c.file != "public/mod/forum/lib.php"));
+        assert!(
+            classifications
+                .iter()
+                .all(|c| c.file != "public/mod/forum/lib.php")
+        );
     }
 
     #[test]
     fn page_requiring_public_config_is_an_entrypoint() {
         let files = vec![
-            ("public/course/view.php".to_string(), vec![result("public/config.php", Some("require"), 12)]),
+            (
+                "public/course/view.php".to_string(),
+                vec![result("public/config.php", Some("require"), 12)],
+            ),
             ("public/config.php".to_string(), vec![]),
         ];
         let classifications = classify(&files, &notation(), false);
         assert_eq!(
-            classifications.iter().find(|c| c.file == "public/course/view.php").unwrap(),
-            &FileClassification { file: "public/course/view.php".to_string(), kind: EntrypointKind::Page, line: None },
+            classifications
+                .iter()
+                .find(|c| c.file == "public/course/view.php")
+                .unwrap(),
+            &FileClassification {
+                file: "public/course/view.php".to_string(),
+                kind: EntrypointKind::Page,
+                line: None
+            },
         );
     }
 
     #[test]
     fn cli_directory_is_classified_as_cli() {
-        let files = vec![("admin/cli/cron.php".to_string(), vec![result("public/config.php", Some("require"), 12)])];
+        let files = vec![(
+            "admin/cli/cron.php".to_string(),
+            vec![result("public/config.php", Some("require"), 12)],
+        )];
         let classifications = classify(&files, &notation(), false);
         assert_eq!(classifications[0].kind, EntrypointKind::Cli);
     }
@@ -461,8 +614,14 @@ mod tests {
     #[test]
     fn file_requiring_an_entrypoint_is_also_an_entrypoint() {
         let files = vec![
-            ("lib/ajax/service-nologin.php".to_string(), vec![result("public/lib/ajax/service.php", Some("require"), 5)]),
-            ("public/lib/ajax/service.php".to_string(), vec![result("public/config.php", Some("require"), 20)]),
+            (
+                "lib/ajax/service-nologin.php".to_string(),
+                vec![result("public/lib/ajax/service.php", Some("require"), 5)],
+            ),
+            (
+                "public/lib/ajax/service.php".to_string(),
+                vec![result("public/config.php", Some("require"), 20)],
+            ),
         ];
         let classifications = classify(&files, &notation(), false);
         assert!(classifications.iter().any(|c| c.file == "lib/ajax/service-nologin.php" && c.kind == EntrypointKind::Page));
@@ -485,11 +644,22 @@ mod tests {
                     result("public/lib/setup.php", Some("require_once"), 10),
                 ],
             ),
-            ("public/lib/setup.php".to_string(), vec![result("public/lib/classes/component.php", Some("require_once"), 442)]),
+            (
+                "public/lib/setup.php".to_string(),
+                vec![result(
+                    "public/lib/classes/component.php",
+                    Some("require_once"),
+                    442,
+                )],
+            ),
             ("public/lib/classes/component.php".to_string(), vec![]),
         ];
         let classifications = classify(&files, &notation(), true);
-        assert!(classifications.iter().all(|c| c.file != "public/some/page.php"));
+        assert!(
+            classifications
+                .iter()
+                .all(|c| c.file != "public/some/page.php")
+        );
     }
 
     /// Without `bootstrap_only`, the synthetic config.php chain would make every entry point
@@ -498,12 +668,25 @@ mod tests {
     #[test]
     fn entrypoint_precedence_hides_it_from_the_default_bootstrap_sweep() {
         let files = vec![
-            ("public/course/view.php".to_string(), vec![result("public/config.php", Some("require"), 12)]),
-            ("public/lib/setup.php".to_string(), vec![result("public/lib/classes/component.php", Some("require_once"), 442)]),
+            (
+                "public/course/view.php".to_string(),
+                vec![result("public/config.php", Some("require"), 12)],
+            ),
+            (
+                "public/lib/setup.php".to_string(),
+                vec![result(
+                    "public/lib/classes/component.php",
+                    Some("require_once"),
+                    442,
+                )],
+            ),
             ("public/lib/classes/component.php".to_string(), vec![]),
         ];
         let classifications = classify(&files, &notation(), false);
-        let view_php = classifications.iter().find(|c| c.file == "public/course/view.php").unwrap();
+        let view_php = classifications
+            .iter()
+            .find(|c| c.file == "public/course/view.php")
+            .unwrap();
         assert_eq!(view_php.kind, EntrypointKind::Page);
     }
 
@@ -515,32 +698,61 @@ mod tests {
     fn bootstrap_only_excludes_files_reachable_only_via_the_synthetic_config_chain() {
         let files = vec![
             ("public/config.php".to_string(), vec![]),
-            ("lib/setup.php".to_string(), vec![result("public/lib/setup.php", Some("require_once"), 29)]),
-            ("public/lib/setup.php".to_string(), vec![result("public/lib/classes/component.php", Some("require_once"), 442)]),
+            (
+                "lib/setup.php".to_string(),
+                vec![result("public/lib/setup.php", Some("require_once"), 29)],
+            ),
+            (
+                "public/lib/setup.php".to_string(),
+                vec![result(
+                    "public/lib/classes/component.php",
+                    Some("require_once"),
+                    442,
+                )],
+            ),
             ("public/lib/classes/component.php".to_string(), vec![]),
         ];
 
         let default_classifications = classify(&files, &notation(), false);
         assert_eq!(
-            default_classifications.iter().find(|c| c.file == "public/config.php").unwrap().kind,
+            default_classifications
+                .iter()
+                .find(|c| c.file == "public/config.php")
+                .unwrap()
+                .kind,
             EntrypointKind::Bootstrap
         );
 
         let bootstrap_only_classifications = classify(&files, &notation(), true);
-        assert!(bootstrap_only_classifications.iter().all(|c| c.file != "public/config.php"));
+        assert!(
+            bootstrap_only_classifications
+                .iter()
+                .all(|c| c.file != "public/config.php")
+        );
     }
 
     #[test]
     fn non_existent_synthetic_nodes_never_appear_in_output() {
         let files = vec![
             ("public/config.php".to_string(), vec![]),
-            ("public/lib/setup.php".to_string(), vec![result("public/lib/classes/component.php", Some("require_once"), 442)]),
+            (
+                "public/lib/setup.php".to_string(),
+                vec![result(
+                    "public/lib/classes/component.php",
+                    Some("require_once"),
+                    442,
+                )],
+            ),
             ("public/lib/classes/component.php".to_string(), vec![]),
         ];
         let classifications = classify(&files, &notation(), false);
         // Root config.php and root lib/setup.php are never scanned files, so they must never be
         // reported even though they are graph nodes internally.
-        assert!(classifications.iter().all(|c| c.file != "config.php" && c.file != "lib/setup.php"));
+        assert!(
+            classifications
+                .iter()
+                .all(|c| c.file != "config.php" && c.file != "lib/setup.php")
+        );
     }
 
     /// On a pre-5.1 layout, config.php's own dirroot and public/config.php's dirroot coincide (no
@@ -550,10 +762,21 @@ mod tests {
     fn pre_5_1_layout_collapses_the_two_config_php_seeds() {
         let files = vec![
             ("config.php".to_string(), vec![]),
-            ("lib/setup.php".to_string(), vec![result("lib/classes/component.php", Some("require_once"), 100)]),
+            (
+                "lib/setup.php".to_string(),
+                vec![result(
+                    "lib/classes/component.php",
+                    Some("require_once"),
+                    100,
+                )],
+            ),
             ("lib/classes/component.php".to_string(), vec![]),
         ];
         let classifications = classify(&files, &PathNotation::new(""), false);
-        assert!(classifications.iter().any(|c| c.file == "lib/setup.php" && c.kind == EntrypointKind::Bootstrap));
+        assert!(
+            classifications
+                .iter()
+                .any(|c| c.file == "lib/setup.php" && c.kind == EntrypointKind::Bootstrap)
+        );
     }
 }

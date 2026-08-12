@@ -16,7 +16,11 @@ pub struct PathNotation {
 impl PathNotation {
     pub fn new(dirroot_prefix: &str) -> Self {
         let prefix = dirroot_prefix.trim_matches('/');
-        let dirroot_segment = if prefix.is_empty() { String::new() } else { format!("/{prefix}") };
+        let dirroot_segment = if prefix.is_empty() {
+            String::new()
+        } else {
+            format!("/{prefix}")
+        };
         Self { dirroot_segment }
     }
 
@@ -98,12 +102,18 @@ mod tests {
 
     #[test]
     fn to_repo_path_dirroot_file() {
-        assert_eq!(PathNotation::new("public/").to_repo_path("@/lib/setup.php"), "public/lib/setup.php");
+        assert_eq!(
+            PathNotation::new("public/").to_repo_path("@/lib/setup.php"),
+            "public/lib/setup.php"
+        );
     }
 
     #[test]
     fn to_repo_path_repo_root_file() {
-        assert_eq!(PathNotation::new("public/").to_repo_path("#/config-dist.php"), "config-dist.php");
+        assert_eq!(
+            PathNotation::new("public/").to_repo_path("#/config-dist.php"),
+            "config-dist.php"
+        );
     }
 
     #[test]
@@ -113,22 +123,34 @@ mod tests {
 
     #[test]
     fn to_repo_path_nested_dirroot_file() {
-        assert_eq!(PathNotation::new("public/").to_repo_path("@/mod/forum/lib.php"), "public/mod/forum/lib.php");
+        assert_eq!(
+            PathNotation::new("public/").to_repo_path("@/mod/forum/lib.php"),
+            "public/mod/forum/lib.php"
+        );
     }
 
     #[test]
     fn to_repo_path_pre_5_1_dirroot_file() {
-        assert_eq!(PathNotation::new("").to_repo_path("@/lib/setup.php"), "lib/setup.php");
+        assert_eq!(
+            PathNotation::new("").to_repo_path("@/lib/setup.php"),
+            "lib/setup.php"
+        );
     }
 
     #[test]
     fn to_repo_path_pre_5_1_repo_root_file() {
-        assert_eq!(PathNotation::new("").to_repo_path("#/config.php"), "config.php");
+        assert_eq!(
+            PathNotation::new("").to_repo_path("#/config.php"),
+            "config.php"
+        );
     }
 
     #[test]
     fn normalise_resolves_dot_and_dot_dot() {
-        assert_eq!(PathNotation::normalise("/public/mod/forum/../../lib/setup.php"), "/public/lib/setup.php");
+        assert_eq!(
+            PathNotation::normalise("/public/mod/forum/../../lib/setup.php"),
+            "/public/lib/setup.php"
+        );
         assert_eq!(PathNotation::normalise("/public/./lib"), "/public/lib");
         assert_eq!(PathNotation::normalise("/public/lib/"), "/public/lib/");
     }
@@ -137,7 +159,10 @@ mod tests {
     /// repository cannot be mistaken for one inside it.
     #[test]
     fn normalise_keeps_dot_dot_above_the_root() {
-        assert_eq!(PathNotation::normalise("/public/lib/../../../../etc/passwd"), "/../../etc/passwd");
+        assert_eq!(
+            PathNotation::normalise("/public/lib/../../../../etc/passwd"),
+            "/../../etc/passwd"
+        );
         assert_eq!(PathNotation::normalise("/.."), "/..");
         assert_eq!(PathNotation::normalise("/public/.."), "/");
     }
@@ -145,7 +170,11 @@ mod tests {
     /// to_repo_path inverts to_glyph for repository-root-relative inputs.
     #[test]
     fn round_trip_from_glyph() {
-        let cases = [("public/", "@/lib/setup.php"), ("public/", "#/config-dist.php"), ("", "@/lib/setup.php")];
+        let cases = [
+            ("public/", "@/lib/setup.php"),
+            ("public/", "#/config-dist.php"),
+            ("", "@/lib/setup.php"),
+        ];
         for (dirroot_prefix, glyph_path) in cases {
             let notation = PathNotation::new(dirroot_prefix);
             let repo_path = notation.to_repo_path(glyph_path);

@@ -25,6 +25,13 @@ struct Cli {
     command: Commands,
 }
 
+// The shared `Find` prefix isn't redundant internal naming — clap derives each subcommand's real,
+// documented CLI name (`find-paths`, `find-components`, `find-entrypoints`, see README.md) straight
+// from these variant names, and the prefix is the shared word in that actual command vocabulary.
+// Renaming the variants to silence this would rename the commands themselves unless every one also
+// got an explicit `#[command(name = ...)]` pin — not worth it for a naming lint that doesn't apply
+// here to begin with.
+#[allow(clippy::enum_variant_names)]
 #[derive(Subcommand)]
 enum Commands {
     /// Scan a Moodle codebase for path references
@@ -68,14 +75,16 @@ enum Commands {
         #[arg(long = "bootstrap-only")]
         bootstrap_only: bool,
     },
-    /// Rewrite a Moodle codebase (only available when the `rewrite` feature is enabled).
-    ///
-    /// Currently only applies the embedded patches to `root` and stops there — the rest of the
-    /// process (see REWRITE_SPEC.md) isn't wired up yet.
+    /// Rewrite a Moodle codebase to remove its reliance on $CFG->dirroot/$CFG->libdir (only
+    /// available when the `rewrite` feature is enabled). Mutates `root` in place — see
+    /// REWRITE_SPEC.md for the full process.
     #[cfg(feature = "rewrite")]
     RewriteMoodle {
         /// Path to the Moodle codebase to patch
         root: PathBuf,
+        /// Write the before/after path scans (as CSV) to this directory
+        #[arg(long = "output-dir")]
+        output_dir: Option<PathBuf>,
     },
 }
 
@@ -161,7 +170,12 @@ fn main() -> ExitCode {
             output_file,
             resolve_components,
             categorise,
-        } => find_paths_command(&root, output_file.as_deref(), resolve_components, categorise),
+        } => find_paths_command(
+            &root,
+            output_file.as_deref(),
+            resolve_components,
+            categorise,
+        ),
         Commands::FindComponents {
             root,
             output_file,
@@ -173,7 +187,7 @@ fn main() -> ExitCode {
             bootstrap_only,
         } => find_entrypoints_command(&root, output_file.as_deref(), bootstrap_only),
         #[cfg(feature = "rewrite")]
-        Commands::RewriteMoodle { root } => rewrite::run(&root),
+        Commands::RewriteMoodle { root, output_dir } => rewrite::run(&root, output_dir.as_deref()),
     }
 }
 
@@ -235,8 +249,15 @@ fn find_paths_command(
                 sanitize(&reference.result.path),
                 sanitize(&reference.result.real_path),
                 reference.source_component.unwrap_or_default(),
-                reference.target.as_ref().map(|t| t.component.clone()).unwrap_or_default(),
-                reference.target.map(|t| t.path_in_component).unwrap_or_default(),
+                reference
+                    .target
+                    .as_ref()
+                    .map(|t| t.component.clone())
+                    .unwrap_or_default(),
+                reference
+                    .target
+                    .map(|t| t.path_in_component)
+                    .unwrap_or_default(),
                 reference.category.to_string(),
             ];
             csv_writer.write_record(record).ok();
@@ -261,7 +282,10 @@ fn find_paths_command(
                         sanitize(&result.path),
                         sanitize(&result.real_path),
                         source_component.clone().unwrap_or_default(),
-                        target.as_ref().map(|t| t.component.clone()).unwrap_or_default(),
+                        target
+                            .as_ref()
+                            .map(|t| t.component.clone())
+                            .unwrap_or_default(),
                         target.map(|t| t.path_in_component).unwrap_or_default(),
                     ]
                 })
@@ -363,7 +387,8 @@ fn find_entrypoints_command(
     // a per-file computation that can be streamed out as it's found.
     let scan = Scan::from_discovery(root, discovered);
     let scanned = scan.files.len();
-    let classifications = moodle::entrypoints::classify(&scan.files, &scan.notation, bootstrap_only);
+    let classifications =
+        moodle::entrypoints::classify(&scan.files, &scan.notation, bootstrap_only);
 
     let mut csv_writer = match create_csv_writer(output_file, &["file", "kind", "line"]) {
         Ok(writer) => writer,

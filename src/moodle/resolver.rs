@@ -143,11 +143,16 @@ impl ComponentResolver {
         }
 
         if let Some((consumed, component)) = best {
-            return Some(Resolution { component: component.to_string(), path_in_component: remainder(path, &ends, consumed) });
+            return Some(Resolution {
+                component: component.to_string(),
+                path_in_component: remainder(path, &ends, consumed),
+            });
         }
 
-        is_certainly_outside_every_component(unmatched)
-            .then(|| Resolution { component: ROOT_COMPONENT.to_string(), path_in_component: remainder(path, &ends, 0) })
+        is_certainly_outside_every_component(unmatched).then(|| Resolution {
+            component: ROOT_COMPONENT.to_string(),
+            path_in_component: remainder(path, &ends, 0),
+        })
     }
 }
 
@@ -160,7 +165,11 @@ impl ComponentResolver {
 /// byte offset in `path` right after the i-th non-empty segment.
 fn remainder(path: &str, ends: &[usize], consumed: usize) -> String {
     if consumed == 0 {
-        return if path.is_empty() { String::new() } else { format!("/{path}") };
+        return if path.is_empty() {
+            String::new()
+        } else {
+            format!("/{path}")
+        };
     }
     path[ends[consumed - 1]..].to_string()
 }
@@ -205,7 +214,8 @@ fn is_certainly_outside_every_component(unmatched: &[&str]) -> bool {
     if !is_plain_segment(first) {
         return false;
     }
-    rest.iter().all(|segment| is_plain_segment(segment) || segment.contains('{'))
+    rest.iter()
+        .all(|segment| is_plain_segment(segment) || segment.contains('{'))
 }
 
 /// Whether `segment` is an ordinary, literal file or directory name.
@@ -213,7 +223,9 @@ fn is_plain_segment(segment: &str) -> bool {
     !segment.is_empty()
         && segment != "."
         && segment != ".."
-        && segment.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '+' | '@' | '~' | ' '))
+        && segment.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '+' | '@' | '~' | ' ')
+        })
 }
 
 /// Whether `segment` is entirely a single dynamic marker (e.g. '{$themename}'), with no literal
@@ -251,39 +263,61 @@ mod tests {
 
     fn discovery(components: &[(&str, &str)], plugin_types: &[(&str, &str)]) -> ComponentDiscovery {
         ComponentDiscovery {
-            components: components.iter().map(|&(name, path)| (name.to_string(), path.to_string())).collect(),
+            components: components
+                .iter()
+                .map(|&(name, path)| (name.to_string(), path.to_string()))
+                .collect(),
             subsystems: BTreeMap::new(),
-            plugin_types: plugin_types.iter().map(|&(name, path)| (name.to_string(), path.to_string())).collect(),
+            plugin_types: plugin_types
+                .iter()
+                .map(|&(name, path)| (name.to_string(), path.to_string()))
+                .collect(),
         }
     }
 
     fn resolve(resolver: &ComponentResolver, path: &str) -> Option<(String, String)> {
-        resolver.resolve(path).map(|r| (r.component, r.path_in_component))
+        resolver
+            .resolve(path)
+            .map(|r| (r.component, r.path_in_component))
     }
 
     #[test]
     fn resolves_exact_directory() {
-        let resolver = ComponentResolver::new(&discovery(&[("mod_forum", "public/mod/forum")], &[]));
-        assert_eq!(resolve(&resolver, "public/mod/forum"), Some(("mod_forum".to_string(), String::new())));
+        let resolver =
+            ComponentResolver::new(&discovery(&[("mod_forum", "public/mod/forum")], &[]));
+        assert_eq!(
+            resolve(&resolver, "public/mod/forum"),
+            Some(("mod_forum".to_string(), String::new()))
+        );
     }
 
     #[test]
     fn resolves_file_within_directory() {
-        let resolver = ComponentResolver::new(&discovery(&[("mod_forum", "public/mod/forum")], &[]));
-        assert_eq!(resolve(&resolver, "public/mod/forum/lib.php"), Some(("mod_forum".to_string(), "/lib.php".to_string())));
+        let resolver =
+            ComponentResolver::new(&discovery(&[("mod_forum", "public/mod/forum")], &[]));
+        assert_eq!(
+            resolve(&resolver, "public/mod/forum/lib.php"),
+            Some(("mod_forum".to_string(), "/lib.php".to_string()))
+        );
     }
 
     #[test]
     fn prefers_the_most_specific_match() {
         let resolver = ComponentResolver::new(&discovery(
-            &[("mod_quiz", "public/mod/quiz"), ("quiz_overview", "public/mod/quiz/report/overview")],
+            &[
+                ("mod_quiz", "public/mod/quiz"),
+                ("quiz_overview", "public/mod/quiz/report/overview"),
+            ],
             &[],
         ));
         assert_eq!(
             resolve(&resolver, "public/mod/quiz/report/overview/report.php"),
             Some(("quiz_overview".to_string(), "/report.php".to_string()))
         );
-        assert_eq!(resolve(&resolver, "public/mod/quiz/lib.php"), Some(("mod_quiz".to_string(), "/lib.php".to_string())));
+        assert_eq!(
+            resolve(&resolver, "public/mod/quiz/lib.php"),
+            Some(("mod_quiz".to_string(), "/lib.php".to_string()))
+        );
     }
 
     /// A literal name immediately below a plugin type root, that passes for a plugin name but is
@@ -292,10 +326,18 @@ mod tests {
     /// plugins happen to be installed in this particular checkout.
     #[test]
     fn plausible_but_uninstalled_plugin_name_synthesises_a_component() {
-        let resolver =
-            ComponentResolver::new(&discovery(&[("mod_forum", "public/mod/forum")], &[("mod", "public/mod")]));
-        assert_eq!(resolve(&resolver, "public/mod/quiz/lib.php"), Some(("mod_quiz".to_string(), "/lib.php".to_string())));
-        assert_eq!(resolve(&resolver, "public/mod/xxxxxxx"), Some(("mod_xxxxxxx".to_string(), String::new())));
+        let resolver = ComponentResolver::new(&discovery(
+            &[("mod_forum", "public/mod/forum")],
+            &[("mod", "public/mod")],
+        ));
+        assert_eq!(
+            resolve(&resolver, "public/mod/quiz/lib.php"),
+            Some(("mod_quiz".to_string(), "/lib.php".to_string()))
+        );
+        assert_eq!(
+            resolve(&resolver, "public/mod/xxxxxxx"),
+            Some(("mod_xxxxxxx".to_string(), String::new()))
+        );
     }
 
     /// 'tests' (and the other fixed, reserved subdirectory names) sits alongside every plugin
@@ -306,16 +348,24 @@ mod tests {
     /// (`core_editor`, if it were registered there), never synthesise a bogus 'editor_tests'.
     #[test]
     fn reserved_non_plugin_dir_name_does_not_synthesise() {
-        let resolver =
-            ComponentResolver::new(&discovery(&[("mod_forum", "public/mod/forum")], &[("mod", "public/mod")]));
+        let resolver = ComponentResolver::new(&discovery(
+            &[("mod_forum", "public/mod/forum")],
+            &[("mod", "public/mod")],
+        ));
         for name in ["tests", "classes", "db", "lang", "amd"] {
             let path = format!("public/mod/{name}/x.php");
-            assert_eq!(resolve(&resolver, &path), Some(("root".to_string(), format!("/{path}"))), "for {path}");
+            assert_eq!(
+                resolve(&resolver, &path),
+                Some(("root".to_string(), format!("/{path}"))),
+                "for {path}"
+            );
         }
         // 'auth' has one exception: a real plugin literally named 'db'.
-        let resolver_auth =
-            ComponentResolver::new(&discovery(&[], &[("auth", "public/auth")]));
-        assert_eq!(resolve(&resolver_auth, "public/auth/db/foo.php"), Some(("auth_db".to_string(), "/foo.php".to_string())));
+        let resolver_auth = ComponentResolver::new(&discovery(&[], &[("auth", "public/auth")]));
+        assert_eq!(
+            resolve(&resolver_auth, "public/auth/db/foo.php"),
+            Some(("auth_db".to_string(), "/foo.php".to_string()))
+        );
     }
 
     /// A path that stops exactly at a plugin type's own root directory (nothing below it at all)
@@ -323,10 +373,18 @@ mod tests {
     /// like any other location no component owns — with or without a trailing slash.
     #[test]
     fn bare_plugin_type_root_resolves_to_root() {
-        let resolver =
-            ComponentResolver::new(&discovery(&[("mod_forum", "public/mod/forum")], &[("mod", "public/mod")]));
-        assert_eq!(resolve(&resolver, "public/mod"), Some(("root".to_string(), "/public/mod".to_string())));
-        assert_eq!(resolve(&resolver, "public/mod/"), Some(("root".to_string(), "/public/mod/".to_string())));
+        let resolver = ComponentResolver::new(&discovery(
+            &[("mod_forum", "public/mod/forum")],
+            &[("mod", "public/mod")],
+        ));
+        assert_eq!(
+            resolve(&resolver, "public/mod"),
+            Some(("root".to_string(), "/public/mod".to_string()))
+        );
+        assert_eq!(
+            resolve(&resolver, "public/mod/"),
+            Some(("root".to_string(), "/public/mod/".to_string()))
+        );
     }
 
     #[test]
@@ -348,7 +406,12 @@ mod tests {
     #[test]
     fn path_outside_every_component_resolves_to_root() {
         let resolver = root_resolver();
-        for path in ["public/config.php", "public/backup/backup.class.php", "vendor/autoload.php", ".github/x.yml"] {
+        for path in [
+            "public/config.php",
+            "public/backup/backup.class.php",
+            "vendor/autoload.php",
+            ".github/x.yml",
+        ] {
             assert_eq!(
                 resolve(&resolver, path),
                 Some(("root".to_string(), format!("/{path}"))),
@@ -361,12 +424,21 @@ mod tests {
     #[test]
     fn repository_root_and_dirroot_resolve_to_root() {
         let resolver = root_resolver();
-        assert_eq!(resolve(&resolver, ""), Some(("root".to_string(), String::new())));
-        assert_eq!(resolve(&resolver, "public"), Some(("root".to_string(), "/public".to_string())));
+        assert_eq!(
+            resolve(&resolver, ""),
+            Some(("root".to_string(), String::new()))
+        );
+        assert_eq!(
+            resolve(&resolver, "public"),
+            Some(("root".to_string(), "/public".to_string()))
+        );
         // A trailing slash carries real information — it is how e.g. "$CFG->dirroot .
         // DIRECTORY_SEPARATOR" renders — so it must survive into path_in_component exactly as it
         // appears in real_path, not get silently dropped.
-        assert_eq!(resolve(&resolver, "public/"), Some(("root".to_string(), "/public/".to_string())));
+        assert_eq!(
+            resolve(&resolver, "public/"),
+            Some(("root".to_string(), "/public/".to_string()))
+        );
     }
 
     /// A doubled slash is noise from a concatenation as far as matching goes — it does not stop
@@ -376,16 +448,28 @@ mod tests {
     #[test]
     fn empty_segments_are_ignored_for_matching_but_preserved_in_the_output() {
         let resolver = root_resolver();
-        assert_eq!(resolve(&resolver, "public//mod/forum//lib.php"), Some(("mod_forum".to_string(), "//lib.php".to_string())));
-        assert_eq!(resolve(&resolver, "public//config.php"), Some(("root".to_string(), "/public//config.php".to_string())));
+        assert_eq!(
+            resolve(&resolver, "public//mod/forum//lib.php"),
+            Some(("mod_forum".to_string(), "//lib.php".to_string()))
+        );
+        assert_eq!(
+            resolve(&resolver, "public//config.php"),
+            Some(("root".to_string(), "/public//config.php".to_string()))
+        );
     }
 
     /// An intermediate directory that merely happens to lie on the way to a component is not a
     /// plugin type root, so nothing can be installed into it.
     #[test]
     fn container_directory_of_a_component_resolves_to_root() {
-        let resolver = ComponentResolver::new(&discovery(&[("qtype_essay", "public/question/type/essay")], &[]));
-        assert_eq!(resolve(&resolver, "public/question/x.php"), Some(("root".to_string(), "/public/question/x.php".to_string())));
+        let resolver = ComponentResolver::new(&discovery(
+            &[("qtype_essay", "public/question/type/essay")],
+            &[],
+        ));
+        assert_eq!(
+            resolve(&resolver, "public/question/x.php"),
+            Some(("root".to_string(), "/public/question/x.php".to_string()))
+        );
     }
 
     /// A trailing slash inside a real component's directory, not just at the repository root,
@@ -394,8 +478,14 @@ mod tests {
     #[test]
     fn trailing_slash_inside_a_component_is_preserved() {
         let resolver = root_resolver();
-        assert_eq!(resolve(&resolver, "public/lib/"), Some(("core".to_string(), "/".to_string())));
-        assert_eq!(resolve(&resolver, "public/lib/tcpdf/"), Some(("core".to_string(), "/tcpdf/".to_string())));
+        assert_eq!(
+            resolve(&resolver, "public/lib/"),
+            Some(("core".to_string(), "/".to_string()))
+        );
+        assert_eq!(
+            resolve(&resolver, "public/lib/tcpdf/"),
+            Some(("core".to_string(), "/tcpdf/".to_string()))
+        );
     }
 
     /// The paths that must never resolve at all: the *first* segment the trie walk failed to
@@ -423,7 +513,11 @@ mod tests {
             "public/backup/view.php?id=1",
         ];
         for path in cases {
-            assert_eq!(resolve(&resolver, path), None, "expected {path} not to resolve");
+            assert_eq!(
+                resolve(&resolver, path),
+                None,
+                "expected {path} not to resolve"
+            );
         }
     }
 
@@ -436,8 +530,15 @@ mod tests {
     #[test]
     fn a_marker_past_the_first_unmatched_segment_still_resolves_to_root() {
         let resolver = root_resolver();
-        for path in ["public/lang/{$lang}/x.php", "public/backup/converter/{$name}/lib.php"] {
-            assert_eq!(resolve(&resolver, path), Some(("root".to_string(), format!("/{path}"))), "for {path}");
+        for path in [
+            "public/lang/{$lang}/x.php",
+            "public/backup/converter/{$name}/lib.php",
+        ] {
+            assert_eq!(
+                resolve(&resolver, path),
+                Some(("root".to_string(), format!("/{path}"))),
+                "for {path}"
+            );
         }
     }
 
@@ -446,8 +547,16 @@ mod tests {
     #[test]
     fn a_name_no_plugin_could_have_resolves_to_root_under_a_plugin_type_root() {
         let resolver = root_resolver();
-        for path in ["public/theme/styles.php", "public/theme/yui_combo.php", "public/local/defaults.php"] {
-            assert_eq!(resolve(&resolver, path), Some(("root".to_string(), format!("/{path}"))), "for {path}");
+        for path in [
+            "public/theme/styles.php",
+            "public/theme/yui_combo.php",
+            "public/local/defaults.php",
+        ] {
+            assert_eq!(
+                resolve(&resolver, path),
+                Some(("root".to_string(), format!("/{path}"))),
+                "for {path}"
+            );
         }
     }
 
@@ -459,9 +568,15 @@ mod tests {
         let resolver = root_resolver();
         assert_eq!(
             resolve(&resolver, "public/theme/standard/pix/gradient.jpg"),
-            Some(("theme_standard".to_string(), "/pix/gradient.jpg".to_string()))
+            Some((
+                "theme_standard".to_string(),
+                "/pix/gradient.jpg".to_string()
+            ))
         );
-        assert_eq!(resolve(&resolver, "public/mod/a/lib.php"), Some(("mod_a".to_string(), "/lib.php".to_string())));
+        assert_eq!(
+            resolve(&resolver, "public/mod/a/lib.php"),
+            Some(("mod_a".to_string(), "/lib.php".to_string()))
+        );
     }
 
     /// A '{...}' placeholder that is the *last* segment, sitting under a purely literal directory
@@ -472,7 +587,10 @@ mod tests {
     fn trailing_placeholder_with_literal_context_resolves_to_root() {
         let resolver = root_resolver();
         let path = "public/install/lang/{$options['lang']}";
-        assert_eq!(resolve(&resolver, path), Some(("root".to_string(), format!("/{path}"))));
+        assert_eq!(
+            resolve(&resolver, path),
+            Some(("root".to_string(), format!("/{path}")))
+        );
     }
 
     /// The same reasoning applies when the placeholder is fused with literal text rather than
@@ -483,15 +601,25 @@ mod tests {
     fn trailing_placeholder_fused_with_literal_text_resolves_to_root() {
         let resolver = root_resolver();
         let path = "public/lang/en/{$file}.php";
-        assert_eq!(resolve(&resolver, path), Some(("root".to_string(), format!("/{path}"))));
+        assert_eq!(
+            resolve(&resolver, path),
+            Some(("root".to_string(), format!("/{path}")))
+        );
     }
 
     /// Ordinary punctuation in a file name is no reason to give up on it.
     #[test]
     fn unusual_but_plain_file_names_resolve_to_root() {
         let resolver = root_resolver();
-        for path in ["lib/bundles/@popperjs/core.js", "public/a+b/c~d/PHP Charting Libraries.txt"] {
-            assert_eq!(resolve(&resolver, path), Some(("root".to_string(), format!("/{path}"))), "for {path}");
+        for path in [
+            "lib/bundles/@popperjs/core.js",
+            "public/a+b/c~d/PHP Charting Libraries.txt",
+        ] {
+            assert_eq!(
+                resolve(&resolver, path),
+                Some(("root".to_string(), format!("/{path}"))),
+                "for {path}"
+            );
         }
     }
 
@@ -507,7 +635,10 @@ mod tests {
     #[test]
     fn dynamic_plugin_name_with_no_trailing_path() {
         let resolver = ComponentResolver::new(&discovery(&[], &[("theme", "public/theme")]));
-        assert_eq!(resolve(&resolver, "public/theme/{$themename}"), Some(("theme_{$themename}".to_string(), String::new())));
+        assert_eq!(
+            resolve(&resolver, "public/theme/{$themename}"),
+            Some(("theme_{$themename}".to_string(), String::new()))
+        );
     }
 
     #[test]
@@ -527,7 +658,10 @@ mod tests {
         // 'report-{$x}' mixes literal text with the marker, so it is not a dynamic plugin name;
         // there is no literal child of that name either, so nothing matches at all.
         let resolver = ComponentResolver::new(&discovery(&[], &[("theme", "public/theme")]));
-        assert_eq!(resolve(&resolver, "public/theme/report-{$x}/config.php"), None);
+        assert_eq!(
+            resolve(&resolver, "public/theme/report-{$x}/config.php"),
+            None
+        );
     }
 
     #[test]
@@ -535,8 +669,10 @@ mod tests {
         // The dynamic segment here comes after 'mod/quiz' (a specific plugin), not after 'mod'
         // (the plugin type root), so it does not get treated as a dynamic plugin name; it just
         // falls into the leftover path under the already-resolved 'mod_quiz'.
-        let resolver =
-            ComponentResolver::new(&discovery(&[("mod_quiz", "public/mod/quiz")], &[("mod", "public/mod")]));
+        let resolver = ComponentResolver::new(&discovery(
+            &[("mod_quiz", "public/mod/quiz")],
+            &[("mod", "public/mod")],
+        ));
         assert_eq!(
             resolve(&resolver, "public/mod/quiz/{$x}/foo.php"),
             Some(("mod_quiz".to_string(), "/{$x}/foo.php".to_string()))

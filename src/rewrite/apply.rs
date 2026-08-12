@@ -25,7 +25,10 @@ fn apply_one(root: &Path, patch: &Patch) -> Result<(), String> {
         .spawn()
         .map_err(|err| format!("failed to run git apply for {}: {err}", patch.name))?;
 
-    let mut stdin = child.stdin.take().expect("stdin was requested as piped above");
+    let mut stdin = child
+        .stdin
+        .take()
+        .expect("stdin was requested as piped above");
 
     // The write happens on its own thread, running concurrently with `wait_with_output` below
     // (which drains stdout/stderr on the caller's behalf) rather than before it, since a patch
@@ -39,7 +42,8 @@ fn apply_one(root: &Path, patch: &Patch) -> Result<(), String> {
         (writer.join().expect("stdin-writer thread panicked"), output)
     });
 
-    let output = output.map_err(|err| format!("failed to wait for git apply on {}: {err}", patch.name))?;
+    let output =
+        output.map_err(|err| format!("failed to wait for git apply on {}: {err}", patch.name))?;
 
     if !output.status.success() {
         return Err(format!(
@@ -52,7 +56,10 @@ fn apply_one(root: &Path, patch: &Patch) -> Result<(), String> {
     // Checked after the exit status: if git already failed and closed its end of the pipe early,
     // that's what caused the write to fail, and the message above is the useful one.
     write_result.map_err(|err| {
-        format!("git apply for {} succeeded, but writing the patch to it failed: {err}", patch.name)
+        format!(
+            "git apply for {} succeeded, but writing the patch to it failed: {err}",
+            patch.name
+        )
     })?;
 
     Ok(())

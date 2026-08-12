@@ -32,8 +32,10 @@ scan-moodle find-paths <ROOT> [OPTIONS]
 
 Output columns: `file`, `line`, `start`, `end`, `code`, `kind`, `glyph_path`, `normalised_path`.
 
-`--categorise` classifies each reference into one of: `config` (targets config.php itself),
-`pre-component` (in a bootstrap file, before core\component is loaded), `dynamic-component`
+`--categorise` classifies each reference into one of: `component` (in core\component's own source
+file or unit test), `config` (targets config.php itself), `pre-component` (in a bootstrap file,
+before core\component is loaded), `include-path-relative` (a bare-literal require/include actually
+resolved via PHP's include path, not relative to the referencing file), `dynamic-component`
 (resolves to a component with a variable name), `dirroot-wrangling` / `root-wrangling` (is exactly
 `$CFG->dirroot` / `$CFG->root` itself, with or without a trailing separator),
 `static-same-component` / `static-different-component` (resolves to a literal file or directory),

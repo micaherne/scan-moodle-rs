@@ -22,7 +22,12 @@ const REPO_ROOT_LIB: &str = "lib";
 pub fn find_thirdparty_locations(root: &Path, discovery: &ComponentDiscovery) -> HashSet<String> {
     let mut locations = HashSet::new();
 
-    let mut component_dirs: Vec<&str> = discovery.components.values().map(String::as_str).filter(|dir| !dir.is_empty()).collect();
+    let mut component_dirs: Vec<&str> = discovery
+        .components
+        .values()
+        .map(String::as_str)
+        .filter(|dir| !dir.is_empty())
+        .collect();
     component_dirs.push(REPO_ROOT_LIB);
 
     for component_dir in component_dirs {
@@ -43,7 +48,11 @@ fn read_locations(root: &Path, component_dir: &str, locations: &mut HashSet<Stri
         return;
     };
 
-    for location in doc.descendants().filter(|node| node.has_tag_name("location")).filter_map(|node| node.text()) {
+    for location in doc
+        .descendants()
+        .filter(|node| node.has_tag_name("location"))
+        .filter_map(|node| node.text())
+    {
         let location = location.trim();
         if location.is_empty() {
             continue;
@@ -55,7 +64,9 @@ fn read_locations(root: &Path, component_dir: &str, locations: &mut HashSet<Stri
 /// Whether `path` (relative to the same root as `locations`) is a declared third-party library
 /// location, or lives inside one.
 pub fn is_thirdparty(locations: &HashSet<String>, path: &str) -> bool {
-    locations.iter().any(|location| path == location || path.starts_with(&format!("{location}/")))
+    locations
+        .iter()
+        .any(|location| path == location || path.starts_with(&format!("{location}/")))
 }
 
 #[cfg(test)]
@@ -64,16 +75,29 @@ mod tests {
 
     #[test]
     fn exact_and_nested_paths_are_thirdparty() {
-        let locations: HashSet<String> = ["public/lib/phpspreadsheet/phpspreadsheet".to_string()].into_iter().collect();
-        assert!(is_thirdparty(&locations, "public/lib/phpspreadsheet/phpspreadsheet"));
-        assert!(is_thirdparty(&locations, "public/lib/phpspreadsheet/phpspreadsheet/src/Writer/Xlsx/Rels.php"));
+        let locations: HashSet<String> = ["public/lib/phpspreadsheet/phpspreadsheet".to_string()]
+            .into_iter()
+            .collect();
+        assert!(is_thirdparty(
+            &locations,
+            "public/lib/phpspreadsheet/phpspreadsheet"
+        ));
+        assert!(is_thirdparty(
+            &locations,
+            "public/lib/phpspreadsheet/phpspreadsheet/src/Writer/Xlsx/Rels.php"
+        ));
     }
 
     #[test]
     fn unrelated_and_sibling_paths_are_not_thirdparty() {
-        let locations: HashSet<String> = ["public/lib/phpspreadsheet/phpspreadsheet".to_string()].into_iter().collect();
+        let locations: HashSet<String> = ["public/lib/phpspreadsheet/phpspreadsheet".to_string()]
+            .into_iter()
+            .collect();
         assert!(!is_thirdparty(&locations, "public/lib/moodlelib.php"));
         // A sibling directory sharing the same prefix must not be matched by a bare `starts_with`.
-        assert!(!is_thirdparty(&locations, "public/lib/phpspreadsheet/phpspreadsheet2/lib.php"));
+        assert!(!is_thirdparty(
+            &locations,
+            "public/lib/phpspreadsheet/phpspreadsheet2/lib.php"
+        ));
     }
 }

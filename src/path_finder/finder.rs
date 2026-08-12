@@ -12,9 +12,11 @@
 //! '@/lib/setup.php'). Files that live above dirroot keep their '#' path.
 //!
 //! Detection: recognises paths starting with $CFG->dirroot, $CFG->libdir, $CFG->root, __DIR__,
-//! __FILE__, dirname(__FILE__), or an interpolated string whose first interpolated value is
-//! $CFG->dirroot/libdir/root. For concat chains, the leftmost leaf is checked so 'a . b . c' is
-//! identified by its first element.
+//! __FILE__, dirname(__FILE__) — any number of calls deep, and in either the classic one-argument
+//! form or PHP's two-argument dirname($path, $levels) form (the two are freely mixable, e.g.
+//! dirname(__DIR__, 2) and dirname(dirname(__DIR__)) climb the same distance) — or an interpolated
+//! string whose first interpolated value is $CFG->dirroot/libdir/root. For concat chains, the
+//! leftmost leaf is checked so 'a . b . c' is identified by its first element.
 //!
 //! Two further, much more speculative, kinds of literal are also recognised, both resolved
 //! relative to the current file's directory (as if implicitly prefixed with `__DIR__ . '/'`):
@@ -92,7 +94,13 @@ pub fn find_paths(source: &str, current_file: &str, notation: &PathNotation) -> 
     );
     let program = mago_syntax::parser::parse_file(&arena, &file);
 
-    let mut context = Context { file: &file, current_file, notation, pending_parent: None, paths: Vec::new() };
+    let mut context = Context {
+        file: &file,
+        current_file,
+        notation,
+        pending_parent: None,
+        paths: Vec::new(),
+    };
     let walker = PathFindingWalker;
     for statement in &program.statements {
         walker.walk_statement(statement, &mut context);
@@ -127,7 +135,9 @@ impl<'ast, 'arena, 'ctx> Walker<'ast, 'arena, Context<'ctx>> for PathFindingWalk
 
         let parent = context.pending_parent.take();
         if is_potential_path(expression) {
-            context.paths.push(build_result(expression, parent, context));
+            context
+                .paths
+                .push(build_result(expression, parent, context));
             return;
         }
         walker::walk_expression(self, expression, context);
@@ -145,19 +155,35 @@ impl<'ast, 'arena, 'ctx> Walker<'ast, 'arena, Context<'ctx>> for PathFindingWalk
         self.walk_expression(assignment.rhs, context);
     }
 
-    fn walk_include_construct(&self, construct: &'ast IncludeConstruct<'arena>, context: &mut Context<'ctx>) {
+    fn walk_include_construct(
+        &self,
+        construct: &'ast IncludeConstruct<'arena>,
+        context: &mut Context<'ctx>,
+    ) {
         self.walk_require_like_construct(construct.value, "include", context);
     }
 
-    fn walk_include_once_construct(&self, construct: &'ast IncludeOnceConstruct<'arena>, context: &mut Context<'ctx>) {
+    fn walk_include_once_construct(
+        &self,
+        construct: &'ast IncludeOnceConstruct<'arena>,
+        context: &mut Context<'ctx>,
+    ) {
         self.walk_require_like_construct(construct.value, "include_once", context);
     }
 
-    fn walk_require_construct(&self, construct: &'ast RequireConstruct<'arena>, context: &mut Context<'ctx>) {
+    fn walk_require_construct(
+        &self,
+        construct: &'ast RequireConstruct<'arena>,
+        context: &mut Context<'ctx>,
+    ) {
         self.walk_require_like_construct(construct.value, "require", context);
     }
 
-    fn walk_require_once_construct(&self, construct: &'ast RequireOnceConstruct<'arena>, context: &mut Context<'ctx>) {
+    fn walk_require_once_construct(
+        &self,
+        construct: &'ast RequireOnceConstruct<'arena>,
+        context: &mut Context<'ctx>,
+    ) {
         self.walk_require_like_construct(construct.value, "require_once", context);
     }
 
@@ -180,7 +206,11 @@ impl<'ast, 'arena, 'ctx> Walker<'ast, 'arena, Context<'ctx>> for PathFindingWalk
         }
     }
 
-    fn walk_static_method_call(&self, call: &'ast StaticMethodCall<'arena>, context: &mut Context<'ctx>) {
+    fn walk_static_method_call(
+        &self,
+        call: &'ast StaticMethodCall<'arena>,
+        context: &mut Context<'ctx>,
+    ) {
         self.walk_expression(call.class, context);
         walker::walk_class_like_member_selector(self, &call.method, context);
         let name = static_call_name(call.class, &call.method);
@@ -210,66 +240,90 @@ impl PathFindingWalker {
     }
 }
 
-fn build_result(expr: &Expression<'_>, parent: Option<String>, context: &Context<'_>) -> PathResult {
+fn build_result(
+    expr: &Expression<'_>,
+    parent: Option<String>,
+    context: &Context<'_>,
+) -> PathResult {
     // `is_potential_path` guarantees `extract_path` returns `Some`.
-    let (real_path, path) = extract_path(expr, context).expect("potential path must be extractable");
+    let (real_path, path) =
+        extract_path(expr, context).expect("potential path must be extractable");
     build_path_result(
         expr,
         parent,
         context,
-        classify_kind(expr),
-        real_path,
-        path,
-        extract_separator(expr),
-        extract_mono_path_expr(expr, context),
+        ResolvedPath {
+            kind: classify_kind(expr),
+            real_path,
+            path,
+            separator: extract_separator(expr),
+            mono_path_expr: extract_mono_path_expr(expr, context),
+        },
     )
 }
 
 /// If `value` is a bare string literal — no concatenation, no other wrapping expression, modulo
 /// redundant parentheses — it is treated as definitely a path: resolved relative to the current
 /// file's directory, as if it were `__DIR__ . '/' . $value`.
-fn build_require_literal_result(value: &Expression<'_>, parent: Option<String>, context: &Context<'_>) -> Option<PathResult> {
+fn build_require_literal_result(
+    value: &Expression<'_>,
+    parent: Option<String>,
+    context: &Context<'_>,
+) -> Option<PathResult> {
     let literal = unwrap_parens(value);
     if !matches!(literal, Expression::Literal(Literal::String(_))) {
         return None;
     }
-    let repo_relative = PathNotation::normalise(&dirname_relative(&node_to_segment(literal, context), context));
+    let repo_relative = PathNotation::normalise(&dirname_relative(
+        &node_to_segment(literal, context),
+        context,
+    ));
     let glyph = context.notation.to_glyph(&repo_relative);
     Some(build_path_result(
         literal,
         parent,
         context,
-        PathKind::RequireLiteral,
-        repo_relative.trim_start_matches('/').to_string(),
-        glyph,
-        String::new(),
-        String::new(),
+        ResolvedPath {
+            kind: PathKind::RequireLiteral,
+            real_path: repo_relative.trim_start_matches('/').to_string(),
+            path: glyph,
+            separator: String::new(),
+            mono_path_expr: String::new(),
+        },
     ))
+}
+
+/// What was resolved about a path reference — as opposed to *where* in the source it was found,
+/// which [`build_path_result`] derives itself from its own `expr`/`context`/`parent` parameters.
+/// This is exactly the subset of [`PathResult`]'s fields the two callers above compute differently
+/// before [`build_path_result`] fills in the rest (`line`, `code`, `start_pos`, `end_pos`).
+struct ResolvedPath {
+    kind: PathKind,
+    real_path: String,
+    path: String,
+    separator: String,
+    mono_path_expr: String,
 }
 
 fn build_path_result(
     expr: &Expression<'_>,
     parent: Option<String>,
     context: &Context<'_>,
-    kind: PathKind,
-    real_path: String,
-    path: String,
-    separator: String,
-    mono_path_expr: String,
+    resolved: ResolvedPath,
 ) -> PathResult {
     let span = expr.span();
     let source = context.file.contents.as_ref();
     PathResult {
-        path,
-        real_path,
-        kind,
+        path: resolved.path,
+        real_path: resolved.real_path,
+        kind: resolved.kind,
         line: context.file.line_number(span.start_offset()) + 1,
         code: source_text(source, span).into_owned(),
         parent,
         start_pos: Some(span.start_offset() as usize),
         end_pos: Some(span.end_offset() as usize),
-        separator,
-        mono_path_expr,
+        separator: resolved.separator,
+        mono_path_expr: resolved.mono_path_expr,
     }
 }
 
@@ -286,7 +340,12 @@ fn unwrap_parens<'e>(mut expr: &'e Expression<'e>) -> &'e Expression<'e> {
 /// If `expr` is a string-concatenation `Binary`, its `(lhs, rhs)`.
 fn as_concat<'e>(expr: &'e Expression<'e>) -> Option<(&'e Expression<'e>, &'e Expression<'e>)> {
     match expr {
-        Expression::Binary(Binary { operator: BinaryOperator::StringConcat(_), lhs, rhs, .. }) => Some((lhs, rhs)),
+        Expression::Binary(Binary {
+            operator: BinaryOperator::StringConcat(_),
+            lhs,
+            rhs,
+            ..
+        }) => Some((lhs, rhs)),
         _ => None,
     }
 }
@@ -330,10 +389,14 @@ fn is_cfg_variable(expr: &Expression<'_>) -> bool {
 }
 
 fn is_cfg_property(expr: &Expression<'_>, name: &[u8]) -> bool {
-    let Expression::Access(Access::Property(PropertyAccess { object, property, .. })) = expr else {
+    let Expression::Access(Access::Property(PropertyAccess {
+        object, property, ..
+    })) = expr
+    else {
         return false;
     };
-    is_cfg_variable(object) && matches!(property, ClassLikeMemberSelector::Identifier(id) if id.value == name)
+    is_cfg_variable(object)
+        && matches!(property, ClassLikeMemberSelector::Identifier(id) if id.value == name)
 }
 
 fn is_cfg_dirroot_libdir_or_root(expr: &Expression<'_>) -> bool {
@@ -358,7 +421,8 @@ fn classify_kind(expr: &Expression<'_>) -> PathKind {
     let mut anchor = if as_concat(expr).is_some() {
         leftmost_concat_leaf(expr)
     } else if let Expression::CompositeString(CompositeString::Interpolated(interpolated)) = expr {
-        first_meaningful_expr(interpolated).expect("is_potential_path guarantees an anchor expression")
+        first_meaningful_expr(interpolated)
+            .expect("is_potential_path guarantees an anchor expression")
     } else {
         expr
     };
@@ -376,7 +440,11 @@ fn classify_kind(expr: &Expression<'_>) -> PathKind {
         PathKind::Root
     } else if matches!(anchor, Expression::MagicConstant(MagicConstant::File(_))) {
         PathKind::File
-    } else if matches!(anchor, Expression::MagicConstant(MagicConstant::Directory(_))) || is_dirname_of_file_or_dir(anchor) {
+    } else if matches!(
+        anchor,
+        Expression::MagicConstant(MagicConstant::Directory(_))
+    ) || is_dirname_of_file_or_dir(anchor)
+    {
         PathKind::Dir
     } else {
         // is_potential_path/is_path_root guarantee the anchor is one of the cases above.
@@ -424,14 +492,42 @@ fn is_dirname_of_file_or_dir(expr: &Expression<'_>) -> bool {
     if identifier_name(id) != "dirname" {
         return false;
     }
-    let mut args = call.argument_list.arguments.iter();
-    let (Some(first), None) = (args.next(), args.next()) else {
+    let Some((arg, _levels)) = dirname_call_target_and_levels(call) else {
         return false;
     };
-    let arg = first.value();
     matches!(arg, Expression::MagicConstant(MagicConstant::File(_)))
         || matches!(arg, Expression::MagicConstant(MagicConstant::Directory(_)))
         || is_dirname_of_file_or_dir(arg)
+}
+
+/// `call`'s first argument (the path it climbs from), together with how many directory levels it
+/// climbs by itself: the literal `$levels` value for PHP's two-argument `dirname($path, $levels)`
+/// form (`dirname(__DIR__, 3)`), which must be a literal integer of 1 or more — a variable level
+/// count, or the (invalid at runtime) `dirname($path, 0)`, is not something this can reason about
+/// statically — or 1 for the classic one-argument form. `None` if `call` isn't shaped like a
+/// recognisable `dirname(...)` call at all: the wrong number of arguments, or a second argument
+/// that isn't a literal integer.
+fn dirname_call_target_and_levels<'e>(
+    call: &'e FunctionCall<'e>,
+) -> Option<(&'e Expression<'e>, u32)> {
+    let mut args = call.argument_list.arguments.iter();
+    let first = args.next()?.value();
+    match args.next() {
+        None => Some((first, 1)),
+        Some(second) => {
+            if args.next().is_some() {
+                return None;
+            }
+            let Expression::Literal(Literal::Integer(integer)) = second.value() else {
+                return None;
+            };
+            let levels = integer
+                .value
+                .and_then(|value| u32::try_from(value).ok())
+                .filter(|&levels| levels >= 1)?;
+            Some((first, levels))
+        }
+    }
 }
 
 /// String-part entries with no source text (mago inserts these as boundary markers around
@@ -439,7 +535,11 @@ fn is_dirname_of_file_or_dir(expr: &Expression<'_>) -> bool {
 /// part list PHP-Parser produces, which the positional checks below (first part, second part)
 /// assume.
 fn meaningful_parts<'e>(interpolated: &'e InterpolatedString<'e>) -> Vec<&'e StringPart<'e>> {
-    interpolated.parts.iter().filter(|part| !matches!(part, StringPart::Literal(l) if l.raw.is_empty())).collect()
+    interpolated
+        .parts
+        .iter()
+        .filter(|part| !matches!(part, StringPart::Literal(l) if l.raw.is_empty()))
+        .collect()
 }
 
 fn string_part_expr<'e>(part: &'e StringPart<'e>) -> Option<&'e Expression<'e>> {
@@ -450,8 +550,13 @@ fn string_part_expr<'e>(part: &'e StringPart<'e>) -> Option<&'e Expression<'e>> 
     }
 }
 
-fn first_meaningful_expr<'e>(interpolated: &'e InterpolatedString<'e>) -> Option<&'e Expression<'e>> {
-    meaningful_parts(interpolated).first().copied().and_then(string_part_expr)
+fn first_meaningful_expr<'e>(
+    interpolated: &'e InterpolatedString<'e>,
+) -> Option<&'e Expression<'e>> {
+    meaningful_parts(interpolated)
+        .first()
+        .copied()
+        .and_then(string_part_expr)
 }
 
 fn identifier_name(id: &Identifier<'_>) -> String {
@@ -462,7 +567,9 @@ fn identifier_name(id: &Identifier<'_>) -> String {
 
 fn member_selector_name(selector: &ClassLikeMemberSelector<'_>) -> Option<String> {
     match selector {
-        ClassLikeMemberSelector::Identifier(id) => Some(String::from_utf8_lossy(id.value).into_owned()),
+        ClassLikeMemberSelector::Identifier(id) => {
+            Some(String::from_utf8_lossy(id.value).into_owned())
+        }
         _ => None,
     }
 }
@@ -484,7 +591,10 @@ fn static_call_class_name(class: &Expression<'_>) -> Option<String> {
     }
 }
 
-fn static_call_name(class: &Expression<'_>, method: &ClassLikeMemberSelector<'_>) -> Option<String> {
+fn static_call_name(
+    class: &Expression<'_>,
+    method: &ClassLikeMemberSelector<'_>,
+) -> Option<String> {
     let class_name = static_call_class_name(class);
     let method_name = member_selector_name(method);
     match (class_name, method_name) {
@@ -529,22 +639,33 @@ fn quote_single(bytes: &[u8]) -> String {
 
 fn node_to_segment(expr: &Expression<'_>, context: &Context<'_>) -> String {
     match expr {
-        Expression::Literal(Literal::String(string)) => decode_literal(string.raw, string.value).into_owned(),
+        Expression::Literal(Literal::String(string)) => {
+            decode_literal(string.raw, string.value).into_owned()
+        }
         Expression::MagicConstant(MagicConstant::Directory(_)) => {
             let dir = php_dirname(context.current_file);
-            if dir == "." { String::new() } else { format!("/{dir}") }
+            if dir == "." {
+                String::new()
+            } else {
+                format!("/{dir}")
+            }
         }
         Expression::MagicConstant(MagicConstant::File(_)) => format!("/{}", context.current_file),
         _ if is_dirname_of_file_or_dir(expr) => {
             let mut depth = 0u32;
             let mut inner = expr;
             while let Expression::Call(Call::Function(call)) = inner {
-                depth += 1;
-                inner = call.argument_list.arguments.iter().next().expect("checked by is_dirname_of_file_or_dir").value();
+                let (target, levels) = dirname_call_target_and_levels(call)
+                    .expect("checked by is_dirname_of_file_or_dir");
+                depth += levels;
+                inner = target;
             }
             // dirname(__DIR__) is equivalent to dirname(dirname(__FILE__)), so __DIR__ as the
             // innermost adds one extra level.
-            if matches!(inner, Expression::MagicConstant(MagicConstant::Directory(_))) {
+            if matches!(
+                inner,
+                Expression::MagicConstant(MagicConstant::Directory(_))
+            ) {
                 depth += 1;
             }
             // `current_file` is repository-relative, so php_dirname sticks at '.' once it reaches
@@ -554,13 +675,23 @@ fn node_to_segment(expr: &Expression<'_>, context: &Context<'_>) -> String {
             let mut dir = context.current_file.to_string();
             let mut above_root = 0;
             for _ in 0..depth {
-                if dir == "." { above_root += 1 } else { dir = php_dirname(&dir) }
+                if dir == "." {
+                    above_root += 1
+                } else {
+                    dir = php_dirname(&dir)
+                }
             }
-            if dir == "." { "/..".repeat(above_root) } else { format!("/{dir}") }
+            if dir == "." {
+                "/..".repeat(above_root)
+            } else {
+                format!("/{dir}")
+            }
         }
-        Expression::Access(Access::Property(PropertyAccess { object, property: ClassLikeMemberSelector::Identifier(id), .. }))
-            if is_cfg_variable(object) =>
-        {
+        Expression::Access(Access::Property(PropertyAccess {
+            object,
+            property: ClassLikeMemberSelector::Identifier(id),
+            ..
+        })) if is_cfg_variable(object) => {
             match id.value {
                 b"dirroot" => context.notation.dirroot_segment().to_string(),
                 b"libdir" => format!("{}/lib", context.notation.dirroot_segment()),
@@ -569,7 +700,10 @@ fn node_to_segment(expr: &Expression<'_>, context: &Context<'_>) -> String {
                 // $CFG->admin is the admin directory *name* (default 'admin'), always written as
                 // "$CFG->dirroot/$CFG->admin/...", so it contributes only the bare segment.
                 b"admin" => "admin".to_string(),
-                _ => format!("{{{}}}", source_text(context.file.contents.as_ref(), expr.span())),
+                _ => format!(
+                    "{{{}}}",
+                    source_text(context.file.contents.as_ref(), expr.span())
+                ),
             }
         }
         Expression::CompositeString(CompositeString::Interpolated(interpolated)) => {
@@ -577,21 +711,35 @@ fn node_to_segment(expr: &Expression<'_>, context: &Context<'_>) -> String {
         }
         Expression::ConstantAccess(ConstantAccess { name }) => {
             let name = identifier_name(name);
-            if name == "DIRECTORY_SEPARATOR" { "/".to_string() } else { format!("{{{name}}}") }
+            if name == "DIRECTORY_SEPARATOR" {
+                "/".to_string()
+            } else {
+                format!("{{{name}}}")
+            }
         }
-        _ => format!("{{{}}}", source_text(context.file.contents.as_ref(), expr.span())),
+        _ => format!(
+            "{{{}}}",
+            source_text(context.file.contents.as_ref(), expr.span())
+        ),
     }
 }
 
 fn build_from_parts(parts: &[&Expression<'_>], context: &Context<'_>) -> String {
-    parts.iter().map(|part| node_to_segment(part, context)).collect()
+    parts
+        .iter()
+        .map(|part| node_to_segment(part, context))
+        .collect()
 }
 
 /// `literal_value` (the plain text of a string literal), resolved as if it were
 /// `__DIR__ . '/' . $literal_value` — relative to the current file's directory.
 fn dirname_relative(literal_value: &str, context: &Context<'_>) -> String {
     let dir = php_dirname(context.current_file);
-    if dir == "." { format!("/{literal_value}") } else { format!("/{dir}/{literal_value}") }
+    if dir == "." {
+        format!("/{literal_value}")
+    } else {
+        format!("/{dir}/{literal_value}")
+    }
 }
 
 fn build_from_interpolated(interpolated: &InterpolatedString<'_>, context: &Context<'_>) -> String {
@@ -600,7 +748,9 @@ fn build_from_interpolated(interpolated: &InterpolatedString<'_>, context: &Cont
         match part {
             StringPart::Literal(l) => result.push_str(&decode_literal(l.raw, l.value)),
             StringPart::Expression(expr) => result.push_str(&node_to_segment(expr, context)),
-            StringPart::BracedExpression(braced) => result.push_str(&node_to_segment(braced.expression, context)),
+            StringPart::BracedExpression(braced) => {
+                result.push_str(&node_to_segment(braced.expression, context))
+            }
         }
     }
     result
@@ -612,8 +762,14 @@ fn extract_path(expr: &Expression<'_>, context: &Context<'_>) -> Option<(String,
     let repo_relative = if as_concat(expr).is_some() {
         let mut parts = Vec::new();
         flatten_concat(expr, &mut parts);
-        let (anchor, rest) = parts.split_first().expect("a concat always flattens to at least two parts");
-        PathNotation::normalise(&format!("{}{}", node_to_segment(anchor, context), build_from_parts(rest, context)))
+        let (anchor, rest) = parts
+            .split_first()
+            .expect("a concat always flattens to at least two parts");
+        PathNotation::normalise(&format!(
+            "{}{}",
+            node_to_segment(anchor, context),
+            build_from_parts(rest, context)
+        ))
     } else {
         match expr {
             Expression::CompositeString(CompositeString::Interpolated(interpolated)) => {
@@ -639,7 +795,9 @@ fn extract_separator(expr: &Expression<'_>) -> String {
                 Expression::Literal(Literal::String(s)) if s.value == Some(&b"/"[..]) => {
                     return "/".to_string();
                 }
-                Expression::ConstantAccess(ConstantAccess { name }) if identifier_name(name) == "DIRECTORY_SEPARATOR" => {
+                Expression::ConstantAccess(ConstantAccess { name })
+                    if identifier_name(name) == "DIRECTORY_SEPARATOR" =>
+                {
                     return "DIRECTORY_SEPARATOR".to_string();
                 }
                 _ => {}
@@ -674,7 +832,11 @@ fn extract_mono_path_expr(expr: &Expression<'_>, context: &Context<'_>) -> Strin
         if parts.is_empty() || !is_dirroot_root(parts[0]) {
             return String::new();
         }
-        return parts[1..].iter().map(|part| source_text(source, part.span()).into_owned()).collect::<Vec<_>>().join(" . ");
+        return parts[1..]
+            .iter()
+            .map(|part| source_text(source, part.span()).into_owned())
+            .collect::<Vec<_>>()
+            .join(" . ");
     }
     if let Expression::CompositeString(CompositeString::Interpolated(interpolated)) = expr {
         let parts = meaningful_parts(interpolated);
@@ -686,7 +848,9 @@ fn extract_mono_path_expr(expr: &Expression<'_>, context: &Context<'_>) -> Strin
             .map(|part| match part {
                 StringPart::Literal(l) => quote_single(l.value.unwrap_or(l.raw)),
                 StringPart::Expression(e) => source_text(source, e.span()).into_owned(),
-                StringPart::BracedExpression(b) => source_text(source, b.expression.span()).into_owned(),
+                StringPart::BracedExpression(b) => {
+                    source_text(source, b.expression.span()).into_owned()
+                }
             })
             .collect::<Vec<_>>()
             .join(" . ");
@@ -700,7 +864,12 @@ mod tests {
 
     fn top_level_expr<'arena>(arena: &'arena LocalArena, code: &str) -> &'arena Expression<'arena> {
         let source = format!("<?php {code};");
-        let file = File::new(Cow::Borrowed(b"test.php"), FileType::Host, None, Cow::Owned(source.into_bytes()));
+        let file = File::new(
+            Cow::Borrowed(b"test.php"),
+            FileType::Host,
+            None,
+            Cow::Owned(source.into_bytes()),
+        );
         let program = mago_syntax::parser::parse_file(arena, &file);
         program
             .statements
@@ -715,24 +884,115 @@ mod tests {
     #[test]
     fn is_potential_path_dirroot_concat() {
         let arena = LocalArena::new();
-        assert!(is_potential_path(top_level_expr(&arena, "$CFG->dirroot . 'lib.php'")));
+        assert!(is_potential_path(top_level_expr(
+            &arena,
+            "$CFG->dirroot . 'lib.php'"
+        )));
     }
 
     #[test]
     fn is_potential_path_dir_magic_constant_concat() {
         let arena = LocalArena::new();
-        assert!(is_potential_path(top_level_expr(&arena, "__DIR__ . 'lib.php'")));
+        assert!(is_potential_path(top_level_expr(
+            &arena,
+            "__DIR__ . 'lib.php'"
+        )));
     }
 
     #[test]
     fn is_potential_path_file_magic_constant_concat() {
         let arena = LocalArena::new();
-        assert!(is_potential_path(top_level_expr(&arena, "__FILE__ . 'lib.php'")));
+        assert!(is_potential_path(top_level_expr(
+            &arena,
+            "__FILE__ . 'lib.php'"
+        )));
     }
 
     #[test]
     fn is_potential_path_unrelated_concat_is_false() {
         let arena = LocalArena::new();
-        assert!(!is_potential_path(top_level_expr(&arena, "'/var/www/html/' . 'lib.php'")));
+        assert!(!is_potential_path(top_level_expr(
+            &arena,
+            "'/var/www/html/' . 'lib.php'"
+        )));
+    }
+
+    /// Resolves a single path expression found in `file`.
+    fn resolve_single(file: &str, code: &str) -> String {
+        let notation = PathNotation::new("public/");
+        let source = format!("<?php {code};");
+        let paths = find_paths(&source, file, &notation);
+        assert_eq!(
+            paths.len(),
+            1,
+            "expected exactly one path for {code:?} ({file})"
+        );
+        paths[0].path.clone()
+    }
+
+    /// PHP's two-argument `dirname($path, $levels)` climbs the same distance as `$levels` nested
+    /// one-argument calls.
+    #[test]
+    fn two_argument_dirname_matches_the_equivalent_nested_form() {
+        let file = "public/mod/quiz/report/overview/report.php";
+        assert_eq!(
+            resolve_single(file, "dirname(__DIR__, 2) . '/lib.php'"),
+            resolve_single(file, "dirname(dirname(__DIR__)) . '/lib.php'")
+        );
+        assert_eq!(
+            resolve_single(file, "dirname(__FILE__, 2) . '/lib.php'"),
+            resolve_single(file, "dirname(dirname(__FILE__)) . '/lib.php'")
+        );
+    }
+
+    #[test]
+    fn two_argument_dirname_resolves_the_expected_target() {
+        assert_eq!(
+            resolve_single(
+                "public/mod/quiz/report/overview/report.php",
+                "dirname(__DIR__, 2) . '/lib.php'"
+            ),
+            "@/mod/quiz/lib.php"
+        );
+    }
+
+    /// `dirname($x, 1)` climbs exactly as far as the bare one-argument form.
+    #[test]
+    fn two_argument_dirname_with_a_level_of_one_matches_the_one_argument_form() {
+        let file = "public/mod/quiz/report/overview/report.php";
+        assert_eq!(
+            resolve_single(file, "dirname(__DIR__, 1) . '/lib.php'"),
+            resolve_single(file, "dirname(__DIR__) . '/lib.php'")
+        );
+    }
+
+    /// A two-argument `dirname(...)` call whose `$levels` is a `0`, is not a literal integer at
+    /// all (e.g. a variable), or is not the only other argument, is not something this tool can
+    /// reason about statically — it is not recognised as a path at all, the same as any other
+    /// unrecognised expression.
+    #[test]
+    fn two_argument_dirname_with_an_unusable_level_is_not_recognised() {
+        let arena = LocalArena::new();
+        for code in [
+            "dirname(__DIR__, 0) . '/lib.php'",
+            "dirname(__DIR__, $n) . '/lib.php'",
+            "dirname(__DIR__, 2, 3) . '/lib.php'",
+        ] {
+            assert!(
+                !is_potential_path(top_level_expr(&arena, code)),
+                "expected {code:?} not to be recognised"
+            );
+        }
+    }
+
+    /// Nested and two-argument `dirname(...)` calls can be freely mixed, e.g. climbing 2 levels
+    /// via the two-argument form and then 1 more via the nested form.
+    #[test]
+    fn mixed_nested_and_two_argument_dirname_calls_compose() {
+        let file = "public/mod/quiz/report/overview/detailed/report.php";
+        assert_eq!(
+            resolve_single(file, "dirname(dirname(__DIR__, 2)) . '/lib.php'"),
+            resolve_single(file, "dirname(dirname(dirname(__DIR__))) . '/lib.php'")
+        );
     }
 }

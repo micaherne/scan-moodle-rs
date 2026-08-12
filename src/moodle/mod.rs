@@ -15,7 +15,11 @@ pub mod thirdparty;
 /// Since Moodle 5.1, $CFG->dirroot lives in a 'public/' subdirectory of the repository root;
 /// earlier layouts have dirroot and the repository root coincide.
 pub fn dirroot_prefix(root: &Path) -> &'static str {
-    if root.join("public").join("lib").join("setup.php").is_file() { "public/" } else { "" }
+    if root.join("public").join("lib").join("setup.php").is_file() {
+        "public/"
+    } else {
+        ""
+    }
 }
 
 /// Whether `relative_path` (repository-root-relative, no leading slash) must be excluded from

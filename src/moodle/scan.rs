@@ -38,7 +38,10 @@ pub fn php_paths<'a>(
     WalkDir::new(root)
         .into_iter()
         .filter_entry(|entry| {
-            !thirdparty::is_thirdparty(thirdparty_locations, &relative_unix_path(root, entry.path()))
+            !thirdparty::is_thirdparty(
+                thirdparty_locations,
+                &relative_unix_path(root, entry.path()),
+            )
         })
         .filter_map(|entry| entry.ok())
         .filter(|entry| entry.file_type().is_file())
@@ -85,7 +88,12 @@ impl Scan {
             })
             .collect();
 
-        Scan { discovered, notation, files, failed_reads: failed.load(Ordering::Relaxed) }
+        Scan {
+            discovered,
+            notation,
+            files,
+            failed_reads: failed.load(Ordering::Relaxed),
+        }
     }
 
     /// Discovers `root`'s components and scans its PHP files in one step.
@@ -111,38 +119,52 @@ pub struct CategorisedReference {
 pub fn categorise_all(scan: &Scan, dirroot: &str) -> Vec<CategorisedReference> {
     let resolver = ComponentResolver::new(&scan.discovered);
     let config_locations = entrypoints::config_locations(&scan.notation);
-    let boundary_lines: HashMap<String, u32> = entrypoints::classify(&scan.files, &scan.notation, true)
-        .into_iter()
-        .filter_map(|classification| classification.line.map(|line| (classification.file, line)))
-        .collect();
-    let plugin_type_roots: HashSet<String> = scan.discovered.plugin_types.values().cloned().collect();
+    let component_locations = entrypoints::component_locations(&scan.notation);
+    let boundary_lines: HashMap<String, u32> =
+        entrypoints::classify(&scan.files, &scan.notation, true)
+            .into_iter()
+            .filter_map(|classification| {
+                classification.line.map(|line| (classification.file, line))
+            })
+            .collect();
+    let plugin_type_roots: HashSet<String> =
+        scan.discovered.plugin_types.values().cloned().collect();
+    // Fixed for the whole scan (see `ScanContext`), so built once here rather than per file —
+    // reborrowed below the same way `resolver` is, so each per-file closure captures a cheap
+    // `Copy` of a reference rather than trying to move the original out on every one of its many
+    // calls.
+    let scan_context = categorise::ScanContext {
+        config_locations: &config_locations,
+        plugin_type_roots: &plugin_type_roots,
+        dirroot,
+    };
 
     scan.files
         .par_iter()
         .flat_map_iter(|(file, results)| {
-            let source_component = resolver.resolve(file).map(|resolution| resolution.component);
-            let file_boundary_line = boundary_lines.get(file).copied();
+            // Owned (unlike `scan_context` below), and so moved into the closure below wholesale
+            // rather than reborrowed — it's resolved fresh per file, so there's no longer-lived
+            // value outside this closure invocation to borrow it from instead.
+            let file_context = categorise::FileContext {
+                is_component_file: component_locations.contains(file),
+                file_boundary_line: boundary_lines.get(file).copied(),
+                source_component: resolver
+                    .resolve(file)
+                    .map(|resolution| resolution.component),
+            };
             // Reborrowed here (rather than letting the `move` below capture the originals
             // directly) so the capture is a cheap `Copy` of a reference, not an attempt to move
             // a `HashSet` out of this `Fn` closure's environment on every one of its many calls.
             let resolver = &resolver;
-            let config_locations = &config_locations;
-            let plugin_type_roots = &plugin_type_roots;
+            let scan_context = &scan_context;
             results.iter().map(move |result| {
                 let target = resolver.resolve(&result.real_path);
-                let category = categorise::categorise(
-                    result,
-                    config_locations,
-                    file_boundary_line,
-                    plugin_type_roots,
-                    source_component.as_deref(),
-                    target.as_ref(),
-                    dirroot,
-                );
+                let category =
+                    categorise::categorise(result, target.as_ref(), scan_context, &file_context);
                 CategorisedReference {
                     file: file.clone(),
                     result: result.clone(),
-                    source_component: source_component.clone(),
+                    source_component: file_context.source_component.clone(),
                     target,
                     category,
                 }

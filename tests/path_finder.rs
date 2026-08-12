@@ -8,7 +8,11 @@ use scan_moodle::path_finder::find_paths;
 #[test]
 fn get_paths_from_fixture_csv() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/paths.csv");
-    let mut reader = csv::ReaderBuilder::new().has_headers(false).flexible(true).from_path(path).unwrap();
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .flexible(true)
+        .from_path(path)
+        .unwrap();
     let notation = PathNotation::new("public/");
 
     let mut checked = 0;
@@ -26,11 +30,21 @@ fn get_paths_from_fixture_csv() {
 
         let source = format!("<?php {code};");
         let paths = find_paths(&source, relative_path, &notation);
-        assert_eq!(paths.len(), 1, "expected exactly one path for {code:?} ({relative_path})");
-        assert_eq!(paths[0].path, expected, "mismatch for {code:?} ({relative_path})");
+        assert_eq!(
+            paths.len(),
+            1,
+            "expected exactly one path for {code:?} ({relative_path})"
+        );
+        assert_eq!(
+            paths[0].path, expected,
+            "mismatch for {code:?} ({relative_path})"
+        );
         checked += 1;
     }
-    assert!(checked > 2000, "expected to check most of the fixture rows, only checked {checked}");
+    assert!(
+        checked > 2000,
+        "expected to check most of the fixture rows, only checked {checked}"
+    );
 }
 
 /// Ported from `PathFindingVisitorTest::testBareCfgDirroot`.
@@ -49,7 +63,11 @@ fn bare_cfg_dirroot() {
 #[test]
 fn assignment_target_is_not_a_path() {
     let notation = PathNotation::new("public/");
-    let paths = find_paths(r#"<?php $CFG->libdir = "$CFG->dirroot/lib";"#, "public/install.php", &notation);
+    let paths = find_paths(
+        r#"<?php $CFG->libdir = "$CFG->dirroot/lib";"#,
+        "public/install.php",
+        &notation,
+    );
     assert_eq!(paths.len(), 1);
     assert_eq!(paths[0].path, "@/lib");
 }
@@ -60,7 +78,11 @@ fn resolve_single(file: &str, code: &str, dirroot_prefix: &str) -> String {
     let notation = PathNotation::new(dirroot_prefix);
     let source = format!("<?php {code};");
     let paths = find_paths(&source, file, &notation);
-    assert_eq!(paths.len(), 1, "expected exactly one path for {code:?} ({file})");
+    assert_eq!(
+        paths.len(),
+        1,
+        "expected exactly one path for {code:?} ({file})"
+    );
     paths[0].path.clone()
 }
 
@@ -69,10 +91,25 @@ fn resolve_single(file: &str, code: &str, dirroot_prefix: &str) -> String {
 fn root_glyph_resolution() {
     let cases: &[(&str, &str, &str, &str)] = &[
         // Files inside dirroot (public/) resolve to '@'.
-        ("public/lib/moodlelib.php", r#"$CFG->dirroot . '/lib/setup.php'"#, "public/", "@/lib/setup.php"),
-        ("public/mod/assign/view.php", r#"__DIR__ . '/locallib.php'"#, "public/", "@/mod/assign/locallib.php"),
+        (
+            "public/lib/moodlelib.php",
+            r#"$CFG->dirroot . '/lib/setup.php'"#,
+            "public/",
+            "@/lib/setup.php",
+        ),
+        (
+            "public/mod/assign/view.php",
+            r#"__DIR__ . '/locallib.php'"#,
+            "public/",
+            "@/mod/assign/locallib.php",
+        ),
         ("public/lib/moodlelib.php", "$CFG->dirroot", "public/", "@"),
-        ("public/lib/moodlelib.php", r#"$CFG->dirroot . '/'"#, "public/", "@/"),
+        (
+            "public/lib/moodlelib.php",
+            r#"$CFG->dirroot . '/'"#,
+            "public/",
+            "@/",
+        ),
         // '#/public' is a pure string prefix for '@', so separator-less concatenations stay
         // faithful: dirroot glued straight onto a variable or a literal keeps the byte semantics.
         (
@@ -106,14 +143,33 @@ fn root_glyph_resolution() {
         ),
         // Files above dirroot that reference siblings above dirroot keep the '#' (repo-root)
         // glyph.
-        ("admin/cli/cron.php", r#"__DIR__ . '/../../config.php'"#, "public/", "#/config.php"),
+        (
+            "admin/cli/cron.php",
+            r#"__DIR__ . '/../../config.php'"#,
+            "public/",
+            "#/config.php",
+        ),
         ("lib/setup.php", "$CFG->dirroot", "public/", "@"),
         // Pre-5.1 layout: repo root is dirroot, prefix empty, everything resolves to '@'.
-        ("lib/moodlelib.php", r#"$CFG->dirroot . '/lib/setup.php'"#, "", "@/lib/setup.php"),
-        ("mod/assign/view.php", r#"__DIR__ . '/locallib.php'"#, "", "@/mod/assign/locallib.php"),
+        (
+            "lib/moodlelib.php",
+            r#"$CFG->dirroot . '/lib/setup.php'"#,
+            "",
+            "@/lib/setup.php",
+        ),
+        (
+            "mod/assign/view.php",
+            r#"__DIR__ . '/locallib.php'"#,
+            "",
+            "@/mod/assign/locallib.php",
+        ),
     ];
     for (file, code, dirroot_prefix, expected) in cases {
-        assert_eq!(resolve_single(file, code, dirroot_prefix), *expected, "code={code}");
+        assert_eq!(
+            resolve_single(file, code, dirroot_prefix),
+            *expected,
+            "code={code}"
+        );
     }
 }
 
@@ -126,7 +182,10 @@ fn mono_path_expr() {
         // DIRECTORY_SEPARATOR verbatim and including the leading separator.
         ("$CFG->dirroot . $includefile", "$includefile"),
         (r#"$CFG->dirroot . '/' . $filename"#, r#"'/' . $filename"#),
-        ("$CFG->dirroot . DIRECTORY_SEPARATOR . $data", "DIRECTORY_SEPARATOR . $data"),
+        (
+            "$CFG->dirroot . DIRECTORY_SEPARATOR . $data",
+            "DIRECTORY_SEPARATOR . $data",
+        ),
         // The case that the lossy path could not represent: DS between two expressions.
         (
             "$CFG->dirroot . DIRECTORY_SEPARATOR . $normalisedpath . DIRECTORY_SEPARATOR . $filename",
@@ -147,7 +206,10 @@ fn mono_path_expr() {
         ),
         // Interpolated-string forms.
         (r#""{$CFG->dirroot}/$badgeimage""#, r#"'/' . $badgeimage"#),
-        (r#""{$CFG->dirroot}/{$data['filepath']}""#, r#"'/' . $data['filepath']"#),
+        (
+            r#""{$CFG->dirroot}/{$data['filepath']}""#,
+            r#"'/' . $data['filepath']"#,
+        ),
         (
             r#""{$CFG->dirroot}" . autoloader::get_h5p_editor_library_base($languagescript)"#,
             "autoloader::get_h5p_editor_library_base($languagescript)",
@@ -195,7 +257,11 @@ fn cfg_root_is_recognised() {
     assert_eq!(paths[0].path, "#");
     assert_eq!(paths[0].kind, PathKind::Root);
 
-    let paths = find_paths("<?php $CFG->root . '/README.md';", "public/lib/moodlelib.php", &notation);
+    let paths = find_paths(
+        "<?php $CFG->root . '/README.md';",
+        "public/lib/moodlelib.php",
+        &notation,
+    );
     assert_eq!(paths.len(), 1);
     assert_eq!(paths[0].path, "#/README.md");
     assert_eq!(paths[0].real_path, "README.md");
@@ -207,7 +273,11 @@ fn cfg_root_is_recognised() {
 #[test]
 fn require_bare_literal_resolves_relative_to_current_file() {
     let notation = PathNotation::new("public/");
-    let paths = find_paths("<?php require('locallib.php');", "public/mod/forum/lib.php", &notation);
+    let paths = find_paths(
+        "<?php require('locallib.php');",
+        "public/mod/forum/lib.php",
+        &notation,
+    );
     assert_eq!(paths.len(), 1);
     assert_eq!(paths[0].kind, PathKind::RequireLiteral);
     assert_eq!(paths[0].real_path, "public/mod/forum/locallib.php");
@@ -220,7 +290,11 @@ fn require_bare_literal_resolves_relative_to_current_file() {
 #[test]
 fn require_bare_literal_starting_with_dots_resolves_correctly() {
     let notation = PathNotation::new("public/");
-    let paths = find_paths("<?php require_once('../config.php');", "public/mod/forum/lib.php", &notation);
+    let paths = find_paths(
+        "<?php require_once('../config.php');",
+        "public/mod/forum/lib.php",
+        &notation,
+    );
     assert_eq!(paths.len(), 1);
     assert_eq!(paths[0].kind, PathKind::RequireLiteral);
     assert_eq!(paths[0].real_path, "public/mod/config.php");
@@ -231,13 +305,21 @@ fn require_bare_literal_starting_with_dots_resolves_correctly() {
 #[test]
 fn include_bare_literal_resolves_relative_to_current_file() {
     let notation = PathNotation::new("public/");
-    let paths = find_paths("<?php include('settings.php');", "public/admin/index.php", &notation);
+    let paths = find_paths(
+        "<?php include('settings.php');",
+        "public/admin/index.php",
+        &notation,
+    );
     assert_eq!(paths.len(), 1);
     assert_eq!(paths[0].kind, PathKind::RequireLiteral);
     assert_eq!(paths[0].real_path, "public/admin/settings.php");
     assert_eq!(paths[0].parent, Some("include".to_string()));
 
-    let paths = find_paths("<?php include_once('settings.php');", "public/admin/index.php", &notation);
+    let paths = find_paths(
+        "<?php include_once('settings.php');",
+        "public/admin/index.php",
+        &notation,
+    );
     assert_eq!(paths.len(), 1);
     assert_eq!(paths[0].parent, Some("include_once".to_string()));
 }
@@ -247,7 +329,11 @@ fn include_bare_literal_resolves_relative_to_current_file() {
 #[test]
 fn require_of_a_concat_is_not_a_bare_literal() {
     let notation = PathNotation::new("public/");
-    let paths = find_paths("<?php require($x . 'lib.php');", "public/mod/forum/lib.php", &notation);
+    let paths = find_paths(
+        "<?php require($x . 'lib.php');",
+        "public/mod/forum/lib.php",
+        &notation,
+    );
     assert_eq!(paths.len(), 0);
 }
 
@@ -268,6 +354,10 @@ fn bare_literal_outside_require_is_not_a_path() {
 #[test]
 fn concat_with_bare_literal_leftmost_is_not_a_path() {
     let notation = PathNotation::new("public/");
-    let paths = find_paths("<?php $x = '../config' . '.php';", "public/mod/forum/lib.php", &notation);
+    let paths = find_paths(
+        "<?php $x = '../config' . '.php';",
+        "public/mod/forum/lib.php",
+        &notation,
+    );
     assert_eq!(paths.len(), 0);
 }

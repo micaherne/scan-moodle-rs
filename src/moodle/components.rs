@@ -18,8 +18,20 @@ type Subsystems = BTreeMap<String, Option<String>>;
 
 /// Directory names ignored when scanning a plugin type's root directory for plugins. 'auth' has
 /// an exception for a plugin literally named 'db' (`\core\component::fetch_plugins`).
-const IGNORED_DIRS: &[&str] =
-    &["CVS", "_vti_cnf", "amd", "classes", "db", "fonts", "lang", "pix", "simpletest", "templates", "tests", "yui"];
+const IGNORED_DIRS: &[&str] = &[
+    "CVS",
+    "_vti_cnf",
+    "amd",
+    "classes",
+    "db",
+    "fonts",
+    "lang",
+    "pix",
+    "simpletest",
+    "templates",
+    "tests",
+    "yui",
+];
 
 /// Plugin types that may declare their own subplugins via a 'db/subplugins.json' file
 /// (`\core\component::$supportsubplugins`). Do not add more without checking upstream first.
@@ -64,7 +76,10 @@ pub fn discover_components(root: &Path) -> Result<ComponentDiscovery, Box<dyn Er
     components.insert("core".to_string(), format!("{}lib", dirroot_prefix(root)));
 
     for (subsystem, path) in &json.subsystems {
-        components.insert(format!("core_{subsystem}"), path.clone().unwrap_or_default());
+        components.insert(
+            format!("core_{subsystem}"),
+            path.clone().unwrap_or_default(),
+        );
     }
 
     let mut plugin_types = BTreeMap::new();
@@ -111,7 +126,11 @@ pub fn discover_components(root: &Path) -> Result<ComponentDiscovery, Box<dyn Er
 
     plugin_types.extend(subplugin_types);
 
-    Ok(ComponentDiscovery { components, subsystems: json.subsystems, plugin_types })
+    Ok(ComponentDiscovery {
+        components,
+        subsystems: json.subsystems,
+        plugin_types,
+    })
 }
 
 /// Lists the plugins of `plugintype` found directly under `type_dir` (relative to `root`), as a
@@ -161,14 +180,21 @@ fn read_subplugin_types(root: &Path, plugin_dir: &str) -> BTreeMap<String, Strin
 
     if !json.subplugintypes.is_empty() {
         // Preferred: paths are relative to the plugin's own directory.
-        json.subplugintypes.into_iter().map(|(subtype, relative_dir)| (subtype, format!("{plugin_dir}/{relative_dir}"))).collect()
+        json.subplugintypes
+            .into_iter()
+            .map(|(subtype, relative_dir)| (subtype, format!("{plugin_dir}/{relative_dir}")))
+            .collect()
     } else {
         // Deprecated fallback: paths predate the Moodle 5.1 dirroot/root split, so they are
         // missing the 'public/' segment rather than being relative to the plugin's directory.
         json.plugintypes
             .into_iter()
             .map(|(subtype, path)| {
-                let path = if path.starts_with("public/") { path } else { format!("public/{path}") };
+                let path = if path.starts_with("public/") {
+                    path
+                } else {
+                    format!("public/{path}")
+                };
                 (subtype, path)
             })
             .collect()
@@ -196,10 +222,17 @@ pub(crate) fn could_be_plugin_name(name: &str) -> bool {
 }
 
 /// This method validates a plugin name. Mirrors `\core\component::is_valid_plugin_name`.
-fn is_valid_plugin_name(plugintype: &str, pluginname: &str, subsystems: &BTreeMap<String, Option<String>>) -> bool {
+fn is_valid_plugin_name(
+    plugintype: &str,
+    pluginname: &str,
+    subsystems: &BTreeMap<String, Option<String>>,
+) -> bool {
     if plugintype == "mod" {
         // Modules must not have the same name as a core subsystem that has its own directory.
-        if subsystems.get(pluginname).is_some_and(|path| path.is_some()) {
+        if subsystems
+            .get(pluginname)
+            .is_some_and(|path| path.is_some())
+        {
             return false;
         }
         // Modules MUST NOT have any underscores, component normalisation would break otherwise.
@@ -218,7 +251,9 @@ fn is_valid_plugin_name(plugintype: &str, pluginname: &str, subsystems: &BTreeMa
 fn is_mod_plugin_name(name: &str) -> bool {
     let bytes = name.as_bytes();
     match bytes.first() {
-        Some(&first) if first.is_ascii_lowercase() => bytes[1..].iter().all(|&b| b.is_ascii_lowercase() || b.is_ascii_digit()),
+        Some(&first) if first.is_ascii_lowercase() => bytes[1..]
+            .iter()
+            .all(|&b| b.is_ascii_lowercase() || b.is_ascii_digit()),
         _ => false,
     }
 }
@@ -233,7 +268,10 @@ fn is_generic_plugin_name(name: &str) -> bool {
     if !bytes[0].is_ascii_lowercase() {
         return false;
     }
-    if !bytes[1..].iter().all(|&b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_') {
+    if !bytes[1..]
+        .iter()
+        .all(|&b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+    {
         return false;
     }
     if *bytes.last().unwrap() == b'_' {

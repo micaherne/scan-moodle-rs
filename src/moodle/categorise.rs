@@ -10,25 +10,50 @@ use std::collections::HashSet;
 use std::fmt;
 
 use crate::moodle::resolver::{ROOT_COMPONENT, Resolution};
-use crate::path_finder::PathResult;
+use crate::path_finder::{PathKind, PathResult};
 
-/// One path reference's category, most-specific rule first: a reference can only be `Config` if
-/// it targets config.php outright, and can only be `PreComponent` if it runs before the
-/// containing file's own boundary line — either check settles the category regardless of what
-/// the reference's target itself resolves to. `PluginTypeRoot` is checked next, ahead of
+/// One path reference's category, most-specific rule first: a reference can only be `Component` if
+/// it appears in `core\component`'s own source file or unit test, and can only be `Config` if it
+/// targets config.php outright; `PreComponent` only if it sits on or before the containing file's
+/// own boundary line — each of those checks settles the category regardless of what the reference
+/// itself resolves to. `IncludePathRelative` is checked next: a plain-literal require/include whose
+/// text names a location Moodle actually resolves through the PHP include path, not relative to
+/// anything this project's rewrites could express. `PluginTypeRoot` is checked after that, ahead of
 /// everything resolution-based, since it too is a plain string match against a fixed, known set of
 /// locations. Past those, `DynamicComponent`, `DirrootWrangling` and `RootWrangling` are specific
 /// shapes checked ahead of the plain same/different-component fallback that everything else
 /// resolved lands in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathCategory {
+    /// Appears in `core\component`'s own source file (`public/lib/classes/component.php`) or its
+    /// unit test (`public/lib/tests/component_test.php`) — see
+    /// [`crate::moodle::entrypoints::component_locations`]. This is Moodle's original, monolithic
+    /// implementation of component/path resolution, which every other rewrite this project
+    /// produces ends up calling into at run time, so nothing in either file is ever rewritten, on
+    /// principle, regardless of what category it would otherwise fall into.
+    Component,
     /// Targets config.php itself (root or `public/`) — see
     /// [`crate::moodle::entrypoints::config_locations`].
     Config,
     /// Sits in a bootstrap file (see [`crate::moodle::entrypoints::classify`] with
-    /// `bootstrap_only: true`), before that file's own boundary line — real file-loading work
-    /// done with no possible access to `core\component` yet, regardless of what it leads to.
+    /// `bootstrap_only: true`), on or before that file's own boundary line — real file-loading
+    /// work done with no possible access to `core\component` yet, regardless of what it leads to.
+    /// The boundary line itself is included: it is the require/include statement that hands off
+    /// into the rest of the bootstrap chain (e.g. the line in setup.php that requires
+    /// component.php), and that statement's own target is resolved and loaded before anything it
+    /// leads to — including component.php's own definitions — has run.
     PreComponent,
+    /// A bare-literal require/include whose text starts with `HTML/` or `PEAR/` — Moodle's
+    /// PEAR-derived form-rendering library, which `public/lib/setup.php` loads by adding
+    /// `lib/pear` to PHP's own include path (`ini_set('include_path', ...)`), not by requiring it
+    /// relative to wherever the referencing file happens to live. The path scan has no way to know
+    /// that and resolves it as if it *were* relative to the referencing file's own directory
+    /// regardless — which sometimes even lands on a real, but wrong, file elsewhere in the same
+    /// component — so this is checked before that resolution is ever trusted. Not rewritten:
+    /// there's no dirroot/libdir dependency here to remove, since the reference itself never
+    /// mentions either — it's PHP's include-path search doing the work, a mechanism this project
+    /// isn't touching.
+    IncludePathRelative,
     /// The reference is exactly a plugin type's own root directory — the directory that holds
     /// every plugin of that type (e.g. `mod/`, `theme/`), which code referencing it directly is
     /// very likely scanning to enumerate installed plugins. This is a different thing entirely
@@ -65,8 +90,10 @@ pub enum PathCategory {
 impl fmt::Display for PathCategory {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            Self::Component => "component",
             Self::Config => "config",
             Self::PreComponent => "pre-component",
+            Self::IncludePathRelative => "include-path-relative",
             Self::PluginTypeRoot => "plugin-type-root",
             Self::DynamicComponent => "dynamic-component",
             Self::DirrootWrangling => "dirroot-wrangling",
@@ -79,45 +106,86 @@ impl fmt::Display for PathCategory {
     }
 }
 
-/// Categorises `result`, one path reference from anywhere in the scanned codebase.
-///
-/// `config_locations` is [`crate::moodle::entrypoints::config_locations`]. `file_boundary_line`
-/// is the line for the file containing `result`, taken from
-/// [`crate::moodle::entrypoints::classify`] called with `bootstrap_only: true` — `None` if that
-/// file isn't in that list at all (true of most files: ordinary application code with no real,
-/// traceable require chain into component.php). `plugin_type_roots` is every plugin type's own
-/// root directory, repository-relative (e.g. 'public/mod', 'public/theme') — the values of
-/// [`crate::moodle::components::ComponentDiscovery::plugin_types`]. `source_component` is the
-/// component owning the containing file itself; `target` is the containing file's own resolution
-/// of `result.real_path`, both via [`crate::moodle::resolver::ComponentResolver`]. `dirroot` is
-/// dirroot's own path relative to the repository root, with no leading or trailing slash (e.g.
-/// 'public', or '' pre-Moodle-5.1 where dirroot and the repository root coincide) — see
-/// [`crate::moodle::dirroot_prefix`]; used only to recognise dirroot-wrangling by shape.
+/// Facts fixed for the whole scan, the same for every file and every reference in it — as opposed
+/// to [`FileContext`] (recomputed per file) or `result`/`target` (the specific reference being
+/// categorised, passed to [`categorise`] directly).
+pub struct ScanContext<'a> {
+    /// [`crate::moodle::entrypoints::config_locations`].
+    pub config_locations: &'a HashSet<String>,
+    /// Every plugin type's own root directory, repository-relative (e.g. 'public/mod',
+    /// 'public/theme') — the values of
+    /// [`crate::moodle::components::ComponentDiscovery::plugin_types`].
+    pub plugin_type_roots: &'a HashSet<String>,
+    /// dirroot's own path relative to the repository root, with no leading or trailing slash (e.g.
+    /// 'public', or '' pre-Moodle-5.1 where dirroot and the repository root coincide) — see
+    /// [`crate::moodle::dirroot_prefix`]; used only to recognise dirroot-wrangling by shape.
+    pub dirroot: &'a str,
+}
+
+/// Facts about the one file containing the reference being categorised, resolved once per file
+/// (the same for every reference within it) — as opposed to [`ScanContext`] (fixed for the whole
+/// scan) or `result`/`target` (the specific reference itself). Owns `source_component` rather than
+/// borrowing it (unlike [`ScanContext`]'s fields) because, unlike the whole-scan facts, it's
+/// resolved fresh per file, from a per-file resolver call — there is no longer-lived value to
+/// borrow it from.
+pub struct FileContext {
+    /// Whether this file is itself one of
+    /// [`crate::moodle::entrypoints::component_locations`] — `core\component`'s own source file or
+    /// its unit test.
+    pub is_component_file: bool,
+    /// This file's own line, taken from [`crate::moodle::entrypoints::classify`] called with
+    /// `bootstrap_only: true` — `None` if the file isn't in that list at all (true of most files:
+    /// ordinary application code with no real, traceable require chain into component.php).
+    pub file_boundary_line: Option<u32>,
+    /// The component owning this file, via [`crate::moodle::resolver::ComponentResolver`].
+    pub source_component: Option<String>,
+}
+
+/// Categorises `result`, one path reference from anywhere in the scanned codebase. `target` is
+/// `result.real_path`'s own resolution via [`crate::moodle::resolver::ComponentResolver`]; `scan`
+/// and `file` supply everything else needed (see [`ScanContext`]/[`FileContext`]).
 pub fn categorise(
     result: &PathResult,
-    config_locations: &HashSet<String>,
-    file_boundary_line: Option<u32>,
-    plugin_type_roots: &HashSet<String>,
-    source_component: Option<&str>,
     target: Option<&Resolution>,
-    dirroot: &str,
+    scan: &ScanContext,
+    file: &FileContext,
 ) -> PathCategory {
-    if config_locations.contains(&result.real_path) {
+    if file.is_component_file {
+        return PathCategory::Component;
+    }
+    if scan.config_locations.contains(&result.real_path) {
         return PathCategory::Config;
     }
-    if file_boundary_line.is_some_and(|boundary_line| result.line < boundary_line) {
+    if file
+        .file_boundary_line
+        .is_some_and(|boundary_line| result.line <= boundary_line)
+    {
         return PathCategory::PreComponent;
     }
-    if is_plugin_type_root(&result.real_path, plugin_type_roots) {
+    if is_include_path_relative(result) {
+        return PathCategory::IncludePathRelative;
+    }
+    if is_plugin_type_root(&result.real_path, scan.plugin_type_roots) {
         return PathCategory::PluginTypeRoot;
     }
     match target {
         Some(resolution) if resolution.component.contains('{') => PathCategory::DynamicComponent,
-        Some(resolution) if resolution.component == ROOT_COMPONENT && is_dirroot_wrangling(&result.real_path, dirroot) => {
+        Some(resolution)
+            if resolution.component == ROOT_COMPONENT
+                && is_dirroot_wrangling(&result.real_path, scan.dirroot) =>
+        {
             PathCategory::DirrootWrangling
         }
-        Some(resolution) if resolution.component == ROOT_COMPONENT && is_root_wrangling(&result.real_path) => PathCategory::RootWrangling,
-        Some(resolution) if source_component == Some(resolution.component.as_str()) => PathCategory::StaticSameComponent,
+        Some(resolution)
+            if resolution.component == ROOT_COMPONENT && is_root_wrangling(&result.real_path) =>
+        {
+            PathCategory::RootWrangling
+        }
+        Some(resolution)
+            if file.source_component.as_deref() == Some(resolution.component.as_str()) =>
+        {
+            PathCategory::StaticSameComponent
+        }
         Some(_) => PathCategory::StaticDifferentComponent,
         // The resolver refuses to resolve anything with a backslash in it — rightly, since a
         // backslash is generally a Windows separator or a namespace, not something it can
@@ -127,11 +195,29 @@ pub fn categorise(
         // separator, exactly like the ordinary `/` case above, just spelled with the other
         // separator — so it is recognised here specifically for wrangling, without loosening how
         // the resolver treats backslashes anywhere else.
-        None if is_dirroot_wrangling(&result.real_path, dirroot) => PathCategory::DirrootWrangling,
+        None if is_dirroot_wrangling(&result.real_path, scan.dirroot) => {
+            PathCategory::DirrootWrangling
+        }
         None if is_root_wrangling(&result.real_path) => PathCategory::RootWrangling,
         None if is_variable_shaped(&result.real_path) => PathCategory::VariableOnly,
         None => PathCategory::Uncategorised,
     }
+}
+
+/// Whether `result` is a bare string literal, used as the sole value of a require/include
+/// construct, whose text starts with `HTML/` or `PEAR/` — see [`PathCategory::IncludePathRelative`].
+/// `result.code` is guaranteed to be the literal's own quoted source text for this `kind` (see
+/// [`crate::path_finder::finder`]), so the surrounding quote character is stripped from each end
+/// before comparing.
+fn is_include_path_relative(result: &PathResult) -> bool {
+    if result.kind != PathKind::RequireLiteral {
+        return false;
+    }
+    let literal = result
+        .code
+        .get(1..result.code.len().saturating_sub(1))
+        .unwrap_or("");
+    literal.starts_with("HTML/") || literal.starts_with("PEAR/")
 }
 
 /// Whether `real_path` is exactly one of `plugin_type_roots`, or one of them with a single
@@ -140,14 +226,18 @@ pub fn categorise(
 /// fixed location.
 fn is_plugin_type_root(real_path: &str, plugin_type_roots: &HashSet<String>) -> bool {
     plugin_type_roots.contains(real_path)
-        || real_path.strip_suffix('/').is_some_and(|stripped| plugin_type_roots.contains(stripped))
+        || real_path
+            .strip_suffix('/')
+            .is_some_and(|stripped| plugin_type_roots.contains(stripped))
 }
 
 /// Whether `real_path` is exactly `dirroot` itself, or that same location with a single trailing
 /// separator appended by how it was concatenated (e.g. `$CFG->dirroot . '/'` or, for code
 /// explicitly checking a Windows-style path, `$CFG->dirroot . '\\'`).
 fn is_dirroot_wrangling(real_path: &str, dirroot: &str) -> bool {
-    real_path == dirroot || real_path == format!("{dirroot}/") || real_path == format!("{dirroot}\\")
+    real_path == dirroot
+        || real_path == format!("{dirroot}/")
+        || real_path == format!("{dirroot}\\")
 }
 
 /// Whether `real_path` is exactly `$CFG->root` itself, or that same location with a trailing
@@ -168,7 +258,9 @@ fn is_root_wrangling(real_path: &str) -> bool {
 /// else) and a backslash (a Windows separator or a namespace, either way not a `/`-delimited path
 /// this scheme can reason about).
 fn is_variable_shaped(real_path: &str) -> bool {
-    real_path.contains('{') && !real_path.contains('\\') && !real_path.split('/').any(|segment| segment == "..")
+    real_path.contains('{')
+        && !real_path.contains('\\')
+        && !real_path.split('/').any(|segment| segment == "..")
 }
 
 #[cfg(test)]
@@ -194,32 +286,192 @@ mod tests {
     }
 
     fn resolution(component: &str, path_in_component: &str) -> Resolution {
-        Resolution { component: component.to_string(), path_in_component: path_in_component.to_string() }
+        Resolution {
+            component: component.to_string(),
+            path_in_component: path_in_component.to_string(),
+        }
+    }
+
+    fn scan_context<'a>(
+        config_locations: &'a HashSet<String>,
+        plugin_type_roots: &'a HashSet<String>,
+        dirroot: &'a str,
+    ) -> ScanContext<'a> {
+        ScanContext {
+            config_locations,
+            plugin_type_roots,
+            dirroot,
+        }
+    }
+
+    fn file_context(
+        is_component_file: bool,
+        file_boundary_line: Option<u32>,
+        source_component: Option<&str>,
+    ) -> FileContext {
+        FileContext {
+            is_component_file,
+            file_boundary_line,
+            source_component: source_component.map(str::to_string),
+        }
     }
 
     #[test]
     fn targeting_config_php_is_config_regardless_of_anything_else() {
         let locations = HashSet::from(["public/config.php".to_string()]);
-        let category = categorise(&result("public/config.php", 999), &locations, Some(1), &HashSet::new(), Some("core"), None, DIRROOT);
+        let category = categorise(
+            &result("public/config.php", 999),
+            None,
+            &scan_context(&locations, &HashSet::new(), DIRROOT),
+            &file_context(false, Some(1), Some("core")),
+        );
         assert_eq!(category, PathCategory::Config);
+    }
+
+    /// A reference in `core\component`'s own source file or unit test is `Component` regardless of
+    /// what it targets — even config.php itself, which would otherwise win every other check.
+    #[test]
+    fn a_reference_in_the_component_file_is_component_regardless_of_anything_else() {
+        let locations = HashSet::from(["public/config.php".to_string()]);
+        let category = categorise(
+            &result("public/config.php", 999),
+            None,
+            &scan_context(&locations, &HashSet::new(), DIRROOT),
+            &file_context(true, Some(1), Some("core")),
+        );
+        assert_eq!(category, PathCategory::Component);
     }
 
     #[test]
     fn a_line_before_the_files_own_boundary_line_is_pre_component() {
-        let locations = HashSet::new();
         let target = resolution("core", "/setup.php");
-        let category =
-            categorise(&result("public/lib/setup.php", 30), &locations, Some(122), &HashSet::new(), Some("tool_behat"), Some(&target), DIRROOT);
+        let category = categorise(
+            &result("public/lib/setup.php", 30),
+            Some(&target),
+            &scan_context(&HashSet::new(), &HashSet::new(), DIRROOT),
+            &file_context(false, Some(122), Some("tool_behat")),
+        );
+        assert_eq!(category, PathCategory::PreComponent);
+    }
+
+    /// The boundary line is the require/include statement that hands off into the rest of the
+    /// bootstrap chain (e.g. the line in setup.php that requires component.php itself) — its own
+    /// target is resolved and loaded before anything on the other end of that hand-off, including
+    /// component.php's own definitions, has run. So the reference sitting on that exact line is
+    /// still pre-component work, not just the lines strictly before it.
+    #[test]
+    fn a_line_exactly_on_the_files_own_boundary_line_is_pre_component() {
+        let target = resolution("core", "/setup.php");
+        let category = categorise(
+            &result("public/lib/setup.php", 122),
+            Some(&target),
+            &scan_context(&HashSet::new(), &HashSet::new(), DIRROOT),
+            &file_context(false, Some(122), Some("tool_behat")),
+        );
         assert_eq!(category, PathCategory::PreComponent);
     }
 
     #[test]
     fn a_line_after_the_files_own_boundary_line_is_not_pre_component() {
-        let locations = HashSet::new();
         let target = resolution("core", "/setup.php");
-        let category =
-            categorise(&result("public/lib/setup.php", 200), &locations, Some(122), &HashSet::new(), Some("tool_behat"), Some(&target), DIRROOT);
+        let category = categorise(
+            &result("public/lib/setup.php", 200),
+            Some(&target),
+            &scan_context(&HashSet::new(), &HashSet::new(), DIRROOT),
+            &file_context(false, Some(122), Some("tool_behat")),
+        );
         assert_eq!(category, PathCategory::StaticDifferentComponent);
+    }
+
+    /// An `HTML/...` bare-literal require resolves, structurally, to a real file in the same
+    /// component as the referencing file (that's what makes this bug worth guarding against — it
+    /// doesn't just fail to resolve) — but it's still `IncludePathRelative`, not
+    /// `StaticSameComponent`: the target here is fiction, since the real file this literal loads at
+    /// run time is found via PHP's include path, not this resolved location.
+    #[test]
+    fn an_html_bare_literal_is_include_path_relative_not_static_same_component() {
+        let target = resolution("core", "/form/HTML/QuickForm/element.php");
+        let category = categorise(
+            &PathResult {
+                kind: PathKind::RequireLiteral,
+                code: "'HTML/QuickForm/element.php'".to_string(),
+                ..result("public/lib/form/HTML/QuickForm/element.php", 29)
+            },
+            Some(&target),
+            &scan_context(&HashSet::new(), &HashSet::new(), DIRROOT),
+            &file_context(false, None, Some("core")),
+        );
+        assert_eq!(category, PathCategory::IncludePathRelative);
+    }
+
+    #[test]
+    fn a_pear_bare_literal_is_include_path_relative() {
+        let category = categorise(
+            &PathResult {
+                kind: PathKind::RequireLiteral,
+                code: "'PEAR/Exception.php'".to_string(),
+                ..result("public/lib/pear/PEAR/Exception.php", 10)
+            },
+            None,
+            &scan_context(&HashSet::new(), &HashSet::new(), DIRROOT),
+            &file_context(false, None, Some("core")),
+        );
+        assert_eq!(category, PathCategory::IncludePathRelative);
+    }
+
+    /// Double-quoted just as much as single-quoted — the check strips whatever one byte of quote
+    /// sits at each end, not a specific quote character.
+    #[test]
+    fn a_double_quoted_html_bare_literal_is_also_include_path_relative() {
+        let category = categorise(
+            &PathResult {
+                kind: PathKind::RequireLiteral,
+                code: "\"HTML/QuickForm.php\"".to_string(),
+                ..result("public/lib/form/HTML/QuickForm.php", 10)
+            },
+            None,
+            &scan_context(&HashSet::new(), &HashSet::new(), DIRROOT),
+            &file_context(false, None, Some("core")),
+        );
+        assert_eq!(category, PathCategory::IncludePathRelative);
+    }
+
+    /// An ordinary bare-literal require that merely happens to resolve into the same directory
+    /// tree is not caught by this — only the `HTML/`/`PEAR/` prefixes are.
+    #[test]
+    fn a_bare_literal_not_matching_html_or_pear_is_not_include_path_relative() {
+        let target = resolution("mod_quiz", "/locallib.php");
+        let category = categorise(
+            &PathResult {
+                kind: PathKind::RequireLiteral,
+                code: "'locallib.php'".to_string(),
+                ..result("public/mod/quiz/locallib.php", 10)
+            },
+            Some(&target),
+            &scan_context(&HashSet::new(), &HashSet::new(), DIRROOT),
+            &file_context(false, None, Some("mod_quiz")),
+        );
+        assert_eq!(category, PathCategory::StaticSameComponent);
+    }
+
+    /// The `HTML/`/`PEAR/` check only applies to an actual bare-literal require — a concatenation
+    /// that merely happens to *contain* the text `HTML/` somewhere in its source (e.g.
+    /// `$CFG->dirroot . 'HTML/foo.php'`) is a completely different, ordinary reference and must not
+    /// be swept up by a plain substring check on the source text.
+    #[test]
+    fn a_non_bare_literal_reference_is_not_include_path_relative_even_if_its_code_contains_html() {
+        let target = resolution("core", "/HTML/foo.php");
+        let category = categorise(
+            &PathResult {
+                kind: PathKind::Dirroot,
+                code: "$CFG->dirroot . 'HTML/foo.php'".to_string(),
+                ..result("public/HTML/foo.php", 10)
+            },
+            Some(&target),
+            &scan_context(&HashSet::new(), &HashSet::new(), DIRROOT),
+            &file_context(false, None, Some("core")),
+        );
+        assert_ne!(category, PathCategory::IncludePathRelative);
     }
 
     /// A dynamic plugin name at its own bare plugin root (nothing after it) is still
@@ -232,34 +484,49 @@ mod tests {
     /// needs human review before being acted on regardless.
     #[test]
     fn a_dynamic_plugin_name_at_its_own_bare_root_is_dynamic_component() {
-        let locations = HashSet::new();
         let target = resolution("mod_{$modname}", "");
-        let category = categorise(&result("public/mod/{$modname}", 10), &locations, None, &HashSet::new(), Some("root"), Some(&target), DIRROOT);
+        let category = categorise(
+            &result("public/mod/{$modname}", 10),
+            Some(&target),
+            &scan_context(&HashSet::new(), &HashSet::new(), DIRROOT),
+            &file_context(false, None, Some("root")),
+        );
         assert_eq!(category, PathCategory::DynamicComponent);
     }
 
     #[test]
     fn a_dynamic_plugin_name_component_with_a_real_path_is_dynamic_component() {
-        let locations = HashSet::new();
         let target = resolution("mod_{$modname}", "/lib.php");
-        let category =
-            categorise(&result("public/mod/{$modname}/lib.php", 10), &locations, None, &HashSet::new(), Some("root"), Some(&target), DIRROOT);
+        let category = categorise(
+            &result("public/mod/{$modname}/lib.php", 10),
+            Some(&target),
+            &scan_context(&HashSet::new(), &HashSet::new(), DIRROOT),
+            &file_context(false, None, Some("root")),
+        );
         assert_eq!(category, PathCategory::DynamicComponent);
     }
 
     #[test]
     fn bare_dirroot_itself_is_dirroot_wrangling() {
-        let locations = HashSet::new();
         let target = resolution("root", "/public");
-        let category = categorise(&result("public", 10), &locations, None, &HashSet::new(), Some("tool_xmldb"), Some(&target), DIRROOT);
+        let category = categorise(
+            &result("public", 10),
+            Some(&target),
+            &scan_context(&HashSet::new(), &HashSet::new(), DIRROOT),
+            &file_context(false, None, Some("tool_xmldb")),
+        );
         assert_eq!(category, PathCategory::DirrootWrangling);
     }
 
     #[test]
     fn dirroot_with_a_trailing_separator_is_also_dirroot_wrangling() {
-        let locations = HashSet::new();
         let target = resolution("root", "/public/");
-        let category = categorise(&result("public/", 10), &locations, None, &HashSet::new(), Some("tool_xmldb"), Some(&target), DIRROOT);
+        let category = categorise(
+            &result("public/", 10),
+            Some(&target),
+            &scan_context(&HashSet::new(), &HashSet::new(), DIRROOT),
+            &file_context(false, None, Some("tool_xmldb")),
+        );
         assert_eq!(category, PathCategory::DirrootWrangling);
     }
 
@@ -271,16 +538,24 @@ mod tests {
     /// off the unresolved `real_path` instead.
     #[test]
     fn dirroot_with_a_trailing_backslash_is_also_dirroot_wrangling() {
-        let locations = HashSet::new();
-        let category = categorise(&result("public\\", 10), &locations, None, &HashSet::new(), Some("enrol_flatfile"), None, DIRROOT);
+        let category = categorise(
+            &result("public\\", 10),
+            None,
+            &scan_context(&HashSet::new(), &HashSet::new(), DIRROOT),
+            &file_context(false, None, Some("enrol_flatfile")),
+        );
         assert_eq!(category, PathCategory::DirrootWrangling);
     }
 
     #[test]
     fn bare_root_itself_is_root_wrangling() {
-        let locations = HashSet::new();
         let target = resolution("root", "");
-        let category = categorise(&result("", 10), &locations, None, &HashSet::new(), Some("tool_xmldb"), Some(&target), DIRROOT);
+        let category = categorise(
+            &result("", 10),
+            Some(&target),
+            &scan_context(&HashSet::new(), &HashSet::new(), DIRROOT),
+            &file_context(false, None, Some("tool_xmldb")),
+        );
         assert_eq!(category, PathCategory::RootWrangling);
     }
 
@@ -289,9 +564,13 @@ mod tests {
     /// empty", not as one specific literal string.
     #[test]
     fn root_with_a_trailing_separator_is_also_root_wrangling() {
-        let locations = HashSet::new();
         let target = resolution("root", "/");
-        let category = categorise(&result("/", 10), &locations, None, &HashSet::new(), Some("tool_xmldb"), Some(&target), DIRROOT);
+        let category = categorise(
+            &result("/", 10),
+            Some(&target),
+            &scan_context(&HashSet::new(), &HashSet::new(), DIRROOT),
+            &file_context(false, None, Some("tool_xmldb")),
+        );
         assert_eq!(category, PathCategory::RootWrangling);
     }
 
@@ -300,8 +579,12 @@ mod tests {
     /// `$CFG->dirroot`.
     #[test]
     fn root_with_a_trailing_backslash_is_also_root_wrangling() {
-        let locations = HashSet::new();
-        let category = categorise(&result("\\", 10), &locations, None, &HashSet::new(), Some("tool_xmldb"), None, DIRROOT);
+        let category = categorise(
+            &result("\\", 10),
+            None,
+            &scan_context(&HashSet::new(), &HashSet::new(), DIRROOT),
+            &file_context(false, None, Some("tool_xmldb")),
+        );
         assert_eq!(category, PathCategory::RootWrangling);
     }
 
@@ -312,10 +595,14 @@ mod tests {
     /// otherwise land in like anything else that resolves to `root`.
     #[test]
     fn a_known_plugin_type_root_is_plugin_type_root_not_static_same_component() {
-        let locations = HashSet::new();
         let plugin_type_roots = HashSet::from(["public/mod".to_string()]);
         let target = resolution("root", "/public/mod");
-        let category = categorise(&result("public/mod", 10), &locations, None, &plugin_type_roots, Some("root"), Some(&target), DIRROOT);
+        let category = categorise(
+            &result("public/mod", 10),
+            Some(&target),
+            &scan_context(&HashSet::new(), &plugin_type_roots, DIRROOT),
+            &file_context(false, None, Some("root")),
+        );
         assert_eq!(category, PathCategory::PluginTypeRoot);
     }
 
@@ -324,11 +611,14 @@ mod tests {
     /// distinction is even considered.
     #[test]
     fn a_known_plugin_type_root_is_plugin_type_root_not_static_different_component() {
-        let locations = HashSet::new();
         let plugin_type_roots = HashSet::from(["public/mod".to_string()]);
         let target = resolution("root", "/public/mod");
-        let category =
-            categorise(&result("public/mod", 10), &locations, None, &plugin_type_roots, Some("mod_forum"), Some(&target), DIRROOT);
+        let category = categorise(
+            &result("public/mod", 10),
+            Some(&target),
+            &scan_context(&HashSet::new(), &plugin_type_roots, DIRROOT),
+            &file_context(false, None, Some("mod_forum")),
+        );
         assert_eq!(category, PathCategory::PluginTypeRoot);
     }
 
@@ -337,9 +627,13 @@ mod tests {
     /// tolerance `DirrootWrangling`/`RootWrangling` give their own fixed location.
     #[test]
     fn plugin_type_root_tolerates_a_trailing_separator() {
-        let locations = HashSet::new();
         let plugin_type_roots = HashSet::from(["public/mod".to_string()]);
-        let category = categorise(&result("public/mod/", 10), &locations, None, &plugin_type_roots, Some("root"), None, DIRROOT);
+        let category = categorise(
+            &result("public/mod/", 10),
+            None,
+            &scan_context(&HashSet::new(), &plugin_type_roots, DIRROOT),
+            &file_context(false, None, Some("root")),
+        );
         assert_eq!(category, PathCategory::PluginTypeRoot);
     }
 
@@ -348,10 +642,13 @@ mod tests {
     /// root directory.
     #[test]
     fn pre_component_still_wins_over_plugin_type_root() {
-        let locations = HashSet::new();
         let plugin_type_roots = HashSet::from(["public/mod".to_string()]);
-        let category =
-            categorise(&result("public/mod", 10), &locations, Some(20), &plugin_type_roots, Some("root"), None, DIRROOT);
+        let category = categorise(
+            &result("public/mod", 10),
+            None,
+            &scan_context(&HashSet::new(), &plugin_type_roots, DIRROOT),
+            &file_context(false, Some(20), Some("root")),
+        );
         assert_eq!(category, PathCategory::PreComponent);
     }
 
@@ -360,56 +657,82 @@ mod tests {
     /// the same as a file within it, not a wrangling category.
     #[test]
     fn a_bare_directory_resolving_to_a_real_component_is_static_same_component() {
-        let locations = HashSet::new();
         let target = resolution("core", "");
-        let category = categorise(&result("public/lib", 10), &locations, None, &HashSet::new(), Some("core"), Some(&target), DIRROOT);
+        let category = categorise(
+            &result("public/lib", 10),
+            Some(&target),
+            &scan_context(&HashSet::new(), &HashSet::new(), DIRROOT),
+            &file_context(false, None, Some("core")),
+        );
         assert_eq!(category, PathCategory::StaticSameComponent);
     }
 
     #[test]
     fn a_literal_file_in_the_same_component_is_static_same_component() {
-        let locations = HashSet::new();
         let target = resolution("core", "/setup.php");
-        let category = categorise(&result("public/lib/setup.php", 10), &locations, None, &HashSet::new(), Some("core"), Some(&target), DIRROOT);
+        let category = categorise(
+            &result("public/lib/setup.php", 10),
+            Some(&target),
+            &scan_context(&HashSet::new(), &HashSet::new(), DIRROOT),
+            &file_context(false, None, Some("core")),
+        );
         assert_eq!(category, PathCategory::StaticSameComponent);
     }
 
     #[test]
     fn a_literal_file_in_a_different_component_is_static_different_component() {
-        let locations = HashSet::new();
         let target = resolution("core", "/classes/component.php");
-        let category =
-            categorise(&result("public/lib/classes/component.php", 10), &locations, None, &HashSet::new(), Some("root"), Some(&target), DIRROOT);
+        let category = categorise(
+            &result("public/lib/classes/component.php", 10),
+            Some(&target),
+            &scan_context(&HashSet::new(), &HashSet::new(), DIRROOT),
+            &file_context(false, None, Some("root")),
+        );
         assert_eq!(category, PathCategory::StaticDifferentComponent);
     }
 
     #[test]
     fn an_unresolved_path_shaped_by_a_variable_is_variable_only() {
-        let locations = HashSet::new();
-        let category = categorise(&result("public{$includefile}", 10), &locations, None, &HashSet::new(), Some("core"), None, DIRROOT);
+        let category = categorise(
+            &result("public{$includefile}", 10),
+            None,
+            &scan_context(&HashSet::new(), &HashSet::new(), DIRROOT),
+            &file_context(false, None, Some("core")),
+        );
         assert_eq!(category, PathCategory::VariableOnly);
     }
 
     #[test]
     fn an_unresolved_path_escaping_the_repository_root_is_uncategorised_not_variable_only() {
-        let locations = HashSet::new();
-        let category = categorise(&result("../moodledata", 10), &locations, None, &HashSet::new(), Some("root"), None, DIRROOT);
+        let category = categorise(
+            &result("../moodledata", 10),
+            None,
+            &scan_context(&HashSet::new(), &HashSet::new(), DIRROOT),
+            &file_context(false, None, Some("root")),
+        );
         assert_eq!(category, PathCategory::Uncategorised);
     }
 
     #[test]
     fn an_unresolved_path_with_no_dynamic_marker_at_all_is_uncategorised() {
-        let locations = HashSet::new();
-        let category = categorise(&result("some/weird/path", 10), &locations, None, &HashSet::new(), Some("root"), None, DIRROOT);
+        let category = categorise(
+            &result("some/weird/path", 10),
+            None,
+            &scan_context(&HashSet::new(), &HashSet::new(), DIRROOT),
+            &file_context(false, None, Some("root")),
+        );
         assert_eq!(category, PathCategory::Uncategorised);
     }
 
     #[test]
     fn a_root_owned_file_is_not_dirroot_wrangling_despite_the_root_pseudo_component() {
-        let locations = HashSet::new();
         let target = resolution("root", "/public/backup/backup.class.php");
-        let category =
-            categorise(&result("public/backup/backup.class.php", 10), &locations, None, &HashSet::new(), Some("tool_xmldb"), Some(&target), DIRROOT);
+        let category = categorise(
+            &result("public/backup/backup.class.php", 10),
+            Some(&target),
+            &scan_context(&HashSet::new(), &HashSet::new(), DIRROOT),
+            &file_context(false, None, Some("tool_xmldb")),
+        );
         assert_eq!(category, PathCategory::StaticDifferentComponent);
     }
 
@@ -420,9 +743,13 @@ mod tests {
     /// leaving it to match-arm-order happenstance.
     #[test]
     fn pre_5_1_dirroot_and_root_coincide_and_resolve_to_dirroot_wrangling() {
-        let locations = HashSet::new();
         let target = resolution("root", "");
-        let category = categorise(&result("", 10), &locations, None, &HashSet::new(), Some("tool_xmldb"), Some(&target), "");
+        let category = categorise(
+            &result("", 10),
+            Some(&target),
+            &scan_context(&HashSet::new(), &HashSet::new(), ""),
+            &file_context(false, None, Some("tool_xmldb")),
+        );
         assert_eq!(category, PathCategory::DirrootWrangling);
     }
 }
