@@ -181,6 +181,31 @@ Every other case — different-component/real, different-component/root — is u
 the source is an entry point; the non-entry-point rules above already produce the right answer for
 both.
 
+#### Entry-point target files
+
+A reference whose *target* — not its source — is itself a page, CLI script or bootstrap file gets
+`$CFG->root . '<path>'` too, regardless of which component the target nominally belongs to and
+regardless of the source's own entry-point status. This overrides every rule above, including the
+same-component/real case: `<path>` here is the target's own plain repository-relative path (e.g.
+`/public/lib/setup.php`), not a path relative to the source, and not a path within whatever
+component the target resolves into for packaging purposes.
+
+Entry points end up placed at their original repository-relative path directly under the project
+root by a step outside this tool's own scope (a not-yet-written Composer plugin), because a page or
+CLI script needs to sit at a fixed, predictable path for a web server or `php` invocation to find
+it, and a bootstrap file specifically must be loadable before `core\component` exists to resolve
+anything through. The same file also still gets copied into its nominal component's own package by
+the tooling that builds those packages, which has no awareness of entry-point status — but that
+copy is inert; the plugin-placed one is the only one that's ever safe to load. A `__DIR__`-relative
+or `component_path()` reference would resolve into the inert package copy instead, and if the entry
+point's real copy is also loaded elsewhere in the same request — which it usually will be, since
+it's an entry point — PHP fatals on redeclaring the same classes/functions from two different files.
+
+This specifically means two files being nominally in the same real component does not guarantee a
+`__DIR__`-relative path stays safe between them the way it does for two root-owned files: root-owned
+content genuinely never moves relative to other root-owned content, but an entry point is pinned
+away from its own component's package while an ordinary file in that same component is not.
+
 #### `variable-only` rewriting
 
 Unlike every rule above, this one doesn't depend on whether the source file is an entry point, and

@@ -48,7 +48,11 @@ pub fn is_eligible(category: PathCategory) -> bool {
 /// script or a page (all three count as "an entry point" here) — the *unrestricted* scan, not
 /// `find-entrypoints`' `--bootstrap-only` one (see `crate::moodle::entrypoints::classify`, called
 /// with `bootstrap_only: false`). Unused for `Config`/`VariableOnly`: neither replacement depends
-/// on whether the source file is an entry point — see their own doc comments for why.
+/// on whether the source file is an entry point — see their own doc comments for why. Checked on
+/// both sides of a `StaticSameComponent`/`StaticDifferentComponent` reference: whether the
+/// *source* file is an entry point affects how a non-entry-point target gets addressed (see the
+/// inline comment above the `match` below); whether the *target* file is an entry point overrides
+/// that entirely, regardless of the source — see the inline comment right before that `match`.
 pub fn decide(
     reference: &CategorisedReference,
     entry_point_files: &HashSet<String>,
@@ -72,6 +76,30 @@ pub fn decide(
     let target_file = &reference.result.real_path;
     let source_is_entry_point = entry_point_files.contains(&reference.file);
 
+    // A page, CLI script or bootstrap file is a special case on the *target* side too, separately
+    // from the source-side handling below: whatever component the entry-point file nominally
+    // belongs to, its file still gets copied into that component's own package like any other file
+    // in it — but a not-yet-written Composer plugin *also* places a copy of every entry point back
+    // at its original path, directly under the project root, because that is the one physical
+    // location a page/CLI script/bootstrap file must sit at to actually work (a web server or `php`
+    // invocation needs it at a fixed, predictable path; a bootstrap file specifically must be
+    // loadable before `core\component` exists to resolve anything through). So an entry-point
+    // target ends up with two copies on disk: the "real" one the plugin places at the project root,
+    // and an inert extra one sitting inside its component's package purely because the one-pass
+    // copy that builds packages doesn't distinguish entry points from ordinary files. A reference
+    // rewritten to reach into the package copy (`__DIR__`-relative or `component_path()`) would
+    // silently load that inert copy instead of the real one — and if the real copy of the same file
+    // is *also* loaded somewhere else in the same request (as it usually will be, since it's an
+    // entry point), PHP fatals on redeclaring the same classes/functions twice. So a reference to an
+    // entry-point target is always rewritten the same way a reference to a `root`-owned target is,
+    // straight to `$CFG->root` — the plugin-placed copy at the project root is the only one that's
+    // ever safe to point at. This overrides everything below, including same-component handling:
+    // two files being nominally in the same component does not mean they end up in the same place
+    // once one of them is an entry point.
+    if target.component != ROOT_COMPONENT && entry_point_files.contains(target_file) {
+        return Some(root_expression(target_file));
+    }
+
     // An entry point never gets a `__DIR__`-relative path, full stop — not just into its own
     // component's code, but anywhere, including root. Nothing about an entry point's own eventual
     // location is settled: today it's a script sitting directly in the deployed layout, but that's
@@ -84,7 +112,7 @@ pub fn decide(
         PathCategory::StaticSameComponent
             if target.component == ROOT_COMPONENT && source_is_entry_point =>
         {
-            Some(root_expression(target))
+            Some(root_expression(target_file))
         }
         PathCategory::StaticSameComponent if target.component == ROOT_COMPONENT => {
             Some(dir_relative_expression(&reference.file, target_file))
@@ -96,7 +124,7 @@ pub fn decide(
             Some(dir_relative_expression(&reference.file, target_file))
         }
         PathCategory::StaticDifferentComponent if target.component == ROOT_COMPONENT => {
-            Some(root_expression(target))
+            Some(root_expression(target_file))
         }
         PathCategory::StaticDifferentComponent => Some(component_path_expression(target)),
         _ => unreachable!("guarded by the debug_assert above"),
@@ -236,13 +264,17 @@ fn component_path_expression(target: &Resolution) -> String {
     )
 }
 
-/// `$CFG->root . '<path>'` for `target`, where `<path>` is `target`'s path-in-component value
-/// (relative to the repository root, since that is "root"'s own directory) used verbatim, with no
-/// trimming — see `REWRITE_SPEC.md`.
-fn root_expression(target: &Resolution) -> String {
+/// `$CFG->root . '<path>'` for `target_file`, a plain repository-root-relative path (no leading
+/// slash, the same shape [`crate::path_finder::PathResult::real_path`] always has) — used verbatim,
+/// with a leading slash spliced on, since `$CFG->root` already points at the repository root. Used
+/// for two different reasons a target can be pinned to this one fixed, permanent location rather
+/// than wherever its owning component's package ends up: it belongs to no component at all (the
+/// `root` pseudo-component), or it's an entry point (see `decide`'s own doc comment) — see
+/// `REWRITE_SPEC.md`.
+fn root_expression(target_file: &str) -> String {
     format!(
         "$CFG->root . {}",
-        quote_php_string(&target.path_in_component)
+        quote_php_string(&format!("/{target_file}"))
     )
 }
 
@@ -589,6 +621,89 @@ mod tests {
         assert_eq!(
             decide(&reference, &entry_points),
             Some("\\core\\component::component_path('mod_forum', 'lib.php')".to_string())
+        );
+    }
+
+    /// A target file that happens to itself be a page, CLI script or bootstrap file has exactly one
+    /// real copy once split up — the one a (not yet written) Composer plugin places back at its
+    /// original path — regardless of which component the reference resolves it into for packaging
+    /// purposes. So it's addressed the same way a `root`-owned target is, `$CFG->root`, never
+    /// `component_path()`, even though this is an ordinary different-component reference in every
+    /// other respect.
+    #[test]
+    fn entry_point_target_in_a_different_component_rewrites_to_cfg_root_not_component_path() {
+        let reference = reference(
+            "public/admin/tool/phpunit/cli/util.php",
+            "public/lib/setup.php",
+            PathKind::Dirroot,
+            PathCategory::StaticDifferentComponent,
+            Some(("core", "/setup.php")),
+        );
+        assert_eq!(
+            decide(&reference, &entry_points(&["public/lib/setup.php"])),
+            Some("$CFG->root . '/public/lib/setup.php'".to_string())
+        );
+    }
+
+    /// The tricky case: unlike two `root`-owned files (which travel together, so a same-component
+    /// reference between them stays `__DIR__`-relative), a source and an entry-point target being
+    /// nominally in the *same* real component does not mean they end up in the same place — the
+    /// source's file still gets packaged, but the target's real copy is pinned to the project root
+    /// by the plugin. `$CFG->root` is still correct here even though the source is not itself an
+    /// entry point.
+    #[test]
+    fn entry_point_target_in_the_same_component_rewrites_to_cfg_root_not_dir_relative() {
+        let reference = reference(
+            "public/lib/classes/deep/nested/path/x.php",
+            "public/lib/setup.php",
+            PathKind::Dirroot,
+            PathCategory::StaticSameComponent,
+            Some(("core", "/setup.php")),
+        );
+        assert_eq!(
+            decide(&reference, &entry_points(&["public/lib/setup.php"])),
+            Some("$CFG->root . '/public/lib/setup.php'".to_string())
+        );
+    }
+
+    /// The entry-point-target rule takes priority regardless of whether the source is *also* an
+    /// entry point — both routes were already going to land on `$CFG->root`, but this confirms they
+    /// don't interact to produce anything unexpected (e.g. a doubled path).
+    #[test]
+    fn entry_point_target_rule_applies_even_when_source_is_also_an_entry_point() {
+        let reference = reference(
+            "public/admin/tool/phpunit/cli/util.php",
+            "public/lib/phpunit/bootstrap.php",
+            PathKind::Dirroot,
+            PathCategory::StaticDifferentComponent,
+            Some(("core", "/phpunit/bootstrap.php")),
+        );
+        let entry_points = entry_points(&[
+            "public/admin/tool/phpunit/cli/util.php",
+            "public/lib/phpunit/bootstrap.php",
+        ]);
+        assert_eq!(
+            decide(&reference, &entry_points),
+            Some("$CFG->root . '/public/lib/phpunit/bootstrap.php'".to_string())
+        );
+    }
+
+    /// A target that is both `root`-owned *and* an entry point (e.g. a root-level CLI script) is
+    /// already handled correctly by the existing `root`-owned-target logic — the new entry-point
+    /// check only ever applies to a target resolving to a *real* component, so it stays out of the
+    /// way here rather than layering a second, redundant rule on top.
+    #[test]
+    fn root_owned_entry_point_target_is_handled_by_the_existing_root_logic() {
+        let reference = reference(
+            "public/course/view.php",
+            "public/r.php",
+            PathKind::Dirroot,
+            PathCategory::StaticDifferentComponent,
+            Some(("root", "/public/r.php")),
+        );
+        assert_eq!(
+            decide(&reference, &entry_points(&["public/r.php"])),
+            Some("$CFG->root . '/public/r.php'".to_string())
         );
     }
 
