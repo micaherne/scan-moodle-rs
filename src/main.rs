@@ -8,6 +8,8 @@ use clap::{Parser, Subcommand};
 use csv::WriterBuilder;
 use rayon::prelude::*;
 
+#[cfg(feature = "rewrite")]
+use scan_moodle::extract_packages;
 use scan_moodle::moodle;
 use scan_moodle::moodle::entrypoints::EntrypointKind;
 use scan_moodle::moodle::resolver::ComponentResolver;
@@ -83,6 +85,24 @@ enum Commands {
         /// Path to the Moodle codebase to patch
         root: PathBuf,
         /// Write the before/after path scans (as CSV) to this directory
+        #[arg(long = "output-dir")]
+        output_dir: Option<PathBuf>,
+    },
+    /// Rewrite a vanilla Moodle codebase (only available when the `rewrite` feature is enabled;
+    /// mutates `root` in place, exactly as `rewrite-moodle` does) and copy the result into a
+    /// directory of self-contained Composer packages, one per component plus a `moodle-root`
+    /// catch-all
+    #[cfg(feature = "rewrite")]
+    ExtractPackages {
+        /// Path to the vanilla Moodle codebase to rewrite and extract
+        root: PathBuf,
+        /// Directory to write the per-package copies into
+        dest: PathBuf,
+        /// Delete the destination's existing contents first, so nothing from an earlier run
+        /// survives into this one
+        #[arg(long = "clean")]
+        clean: bool,
+        /// Write the rewrite step's before/after path scans (as CSV) to this directory
         #[arg(long = "output-dir")]
         output_dir: Option<PathBuf>,
     },
@@ -188,6 +208,13 @@ fn main() -> ExitCode {
         } => find_entrypoints_command(&root, output_file.as_deref(), bootstrap_only),
         #[cfg(feature = "rewrite")]
         Commands::RewriteMoodle { root, output_dir } => rewrite::run(&root, output_dir.as_deref()),
+        #[cfg(feature = "rewrite")]
+        Commands::ExtractPackages {
+            root,
+            dest,
+            clean,
+            output_dir,
+        } => extract_packages::run(&root, &dest, clean, output_dir.as_deref()),
     }
 }
 

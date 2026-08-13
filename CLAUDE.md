@@ -54,6 +54,19 @@ anywhere: a bug fix, a new feature, a test, an API design, a "simple" one-line c
 standard everywhere, and when a shortcut's acceptability is genuinely unclear, say so and ask,
 rather than shipping it quietly.
 
+## `cargo doc`, lint, and clippy warnings are not acceptable — fix them, don't leave them
+
+A warning from `cargo doc`, `cargo build`'s own lints, or `cargo clippy` is not something to leave
+for later just because it isn't the thing currently being worked on, and not something to note and
+move past either. If a command run for any reason in this project surfaces one — even as unrelated
+output alongside something else being checked — fix it before calling the work done. This holds
+regardless of whether the warning is old or was just introduced, and regardless of whether the file
+it's in is one currently being touched.
+
+This is a specific instance of the "hold code to a professional bar" standard above, called out on
+its own because it's easy to read compiler/doc/lint output as background noise to be tolerated
+rather than as the same kind of finding a human reviewer would flag.
+
 ## Take the user's assertions at face value — don't go looking for evidence against them
 
 When the user states something as fact — about this project, its history, why something is the way

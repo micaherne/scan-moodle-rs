@@ -12,14 +12,14 @@
 //! component.php itself, anything that requires it, anything that requires *that*, and so on.
 //!
 //! config.php never exists in a bare checkout, so two hops of that chain can never be discovered
-//! by scanning it and must be injected by hand (see [`add_synthetic_config_chain`]); by default
+//! by scanning it and must be injected by hand (see `add_synthetic_config_chain`); by default
 //! those hops are included, which transitively pulls every entry point into the bootstrap set too
 //! (every page reaches component.php via config.php) — `bootstrap_only` omits them, and reports
 //! bootstrap files only, leaving just the files that reach component.php without going through
 //! config.php at all (e.g. install.php). Outside `bootstrap_only`, a file that is also an entry
 //! point is reported as such rather than as bootstrap: knowing it's a page is more useful than
 //! knowing it eventually reaches component.php — *unless* it does real file-loading work of its
-//! own before its own config.php line (see [`bootstrap_boundary_for_pre_config_work`]), such as
+//! own before its own config.php line (see `bootstrap_boundary_for_pre_config_work`), such as
 //! public/lib/phpunit/bootstrap.php's two requires before its config.php require: those requires
 //! run with no possible access to core\component yet, regardless of what they themselves happen to
 //! lead to, which earns "bootstrap" outright, and unlike the general precedence rule, that is not

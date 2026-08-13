@@ -70,7 +70,7 @@ impl ComponentResolver {
     /// Resolves `path` to the most specific component that contains it, along with the path
     /// within that component's directory. Falls back to the [`ROOT_COMPONENT`] pseudo-component
     /// when no component matches but the path can be shown to be outside all of them (see
-    /// [`is_certainly_outside_every_component`]); since that pseudo-component's directory is the
+    /// `is_certainly_outside_every_component`); since that pseudo-component's directory is the
     /// repository root, its `path_in_component` is `path` itself with a leading slash spliced on.
     /// Returns `None` when no component matches and that cannot be established.
     ///
@@ -92,7 +92,7 @@ impl ComponentResolver {
     /// treated this way when it is not already a real, discovered child of that node (an actually
     /// installed plugin is resolved via its own indexed directory instead, further down this loop)
     /// and is not one of the fixed non-plugin subdirectories every plugin type root reserves, such
-    /// as 'tests' or 'classes' (see [`is_reserved_non_plugin_dir`]) — those are plain,
+    /// as 'tests' or 'classes' (see `is_reserved_non_plugin_dir`) — those are plain,
     /// plugin-name-shaped words, but discovery itself never treats them as a plugin either.
     pub fn resolve(&self, path: &str) -> Option<Resolution> {
         // Empty segments are not directory names — a trailing or doubled slash is just noise from

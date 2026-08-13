@@ -12,10 +12,13 @@ use super::decide::{decide, is_eligible};
 use super::output::AuditWriter;
 
 /// Rewrites every eligible reference among `references` directly on the files under `root`.
-/// Ineligible references (anything other than
-/// [`crate::moodle::categorise::PathCategory::StaticSameComponent`] or
-/// [`crate::moodle::categorise::PathCategory::StaticDifferentComponent`]) and references
-/// [`decide`] leaves unchanged are skipped. Returns how many references were actually changed.
+/// Eligibility is [`is_eligible`]'s — [`crate::moodle::categorise::PathCategory::Config`],
+/// [`crate::moodle::categorise::PathCategory::StaticSameComponent`],
+/// [`crate::moodle::categorise::PathCategory::StaticDifferentComponent`] and
+/// [`crate::moodle::categorise::PathCategory::VariableOnly`]. Every other category is skipped, as
+/// is any eligible reference [`decide`] produces no replacement for (which for `Config` and
+/// `VariableOnly` is a real possibility, not just a theoretical one — see [`decide`]). Returns how
+/// many references were actually changed.
 ///
 /// If `audit` is given, one row is written to it for *every* reference in `references` — not
 /// just the eligible ones — as each is decided, rather than assembled into memory first; see

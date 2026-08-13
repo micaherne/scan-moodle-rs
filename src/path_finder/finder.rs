@@ -29,7 +29,7 @@
 //!
 //! Extraction: maps each node in the expression to a path segment, relative to the repository
 //! root:
-//!   - $CFG->dirroot => the dirroot prefix (e.g. '/public'), $CFG->libdir => '<dirroot>/lib',
+//!   - $CFG->dirroot => the dirroot prefix (e.g. '/public'), $CFG->libdir => `'<dirroot>/lib'`,
 //!     $CFG->root => '' (the bare repository root), $CFG->admin => 'admin' (the bare directory
 //!     name, always used as "$CFG->dirroot/$CFG->admin")
 //!   - __DIR__ => '/dir/of/current/file', dirname(__FILE__) => directory N levels up

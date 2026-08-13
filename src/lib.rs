@@ -1,3 +1,5 @@
+#[cfg(feature = "rewrite")]
+pub mod extract_packages;
 pub mod moodle;
 pub mod path_finder;
 #[cfg(feature = "rewrite")]
