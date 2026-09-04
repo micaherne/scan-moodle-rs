@@ -37,15 +37,19 @@ Three scans are run, in code, directly against the library functions that alread
 - **Path scan**: every path reference in the codebase, with its category (see below).
 - **Component scan**: every component (core, subsystems, plugins, subplugins), with its location
   relative to the codebase root.
-- **Entrypoint scan**: every bootstrap file, CLI script and page in the codebase, each labelled
-  with which of those three it is. Unlike the existing `find-entrypoints` command's default, this
-  is the *unrestricted* scan — CLI scripts and pages are included, not just bootstrap files.
+- **Entrypoint scan**: every file in the codebase that must be placed back at a fixed location
+  rather than found through `core\component`, each labelled `cli` (lives under a 'cli' directory),
+  `other` (reaches component.php directly, everywhere else — pages included, since there is no
+  programmatic way to tell an ordinary page apart from internal framework plumbing that reaches
+  the boundary the same way), or `bootstrap-dependency` (never reaches component.php itself, only
+  loaded before some other file's own boundary line runs). This is the same, single, unrestricted
+  computation `find-entrypoints` reports in full.
 
 The results of all three scans are kept in memory for the next step.
 
 ### 3. Rewrite the eligible path references
 
-The path scan categorises every reference it finds. Four of those categories are ever rewritten:
+The path scan categorises every reference it finds. Five of those categories are ever rewritten:
 
 - **static-same-component** and **static-different-component** mean the reference resolves to a
   real, known file or directory inside a real, known component (the same component as the file
@@ -56,23 +60,29 @@ The path scan categorises every reference it finds. Four of those categories are
   below.
 - **config** means the reference targets config.php itself. See "config.php rewriting" below —
   it's rewritten too, but to something narrower than every other eligible category gets.
+- **pre-component-literal** means the reference is a bare string literal sitting in a bootstrap
+  file's own pre-component code (see below). See "pre-component-literal rewriting" below — like
+  `config`, it's rewritten to something narrower than the general case.
 
 Every other category — component, pre-component, include-path-relative, plugin-type-root,
 dynamic-component, dirroot-wrangling, root-wrangling, uncategorised — is left completely untouched
 by this step, in every file, with no exceptions. This matters most for bootstrap files: they
 routinely contain pre-component lines (real file-loading work done before `core\component` could
 possibly be available yet), and those lines must never be changed no matter what other rule below
-might seem to apply to the file they're in. It also matters for `core\component`'s own original
-implementation (see "the `component` category" below): the rewrite this step produces must never
-end up quietly modifying the very code that output calls into at run time.
+might seem to apply to the file they're in — with one narrow exception, a bare string literal among
+them, which is exactly what the `pre-component-literal` category above exists to carve out; see
+"pre-component-literal rewriting" below for why that one shape can't be left alone the way the rest
+of pre-component code can. It also matters for `core\component`'s own original implementation (see
+"the `component` category" below): the rewrite this step produces must never end up quietly
+modifying the very code that output calls into at run time.
 
 #### The `component` category
 
 `public/lib/classes/component.php` (the `core\component` class itself) and its unit test,
 `public/lib/tests/component_test.php`, are Moodle's original, monolithic implementation of
 component/path resolution — the code the patches applied in step 1 add `component_path()` and
-`from_mono_path()` to, and the code every rewrite this step produces ends up calling into at run
-time. Every reference in either file, regardless of what category it would otherwise fall into
+`from_mono_path()` to (and promote the existing `get_path()` from `protected` to `public`), and
+the code every rewrite this step produces ends up calling into at run time. Every reference in either file, regardless of what category it would otherwise fall into
 based on what it targets, is categorised `component` instead and left completely untouched.
 Rewriting the implementation those methods are made of, using the methods themselves, makes no
 sense on its own terms, on top of the risk of the class ending up calling its own not-yet-defined
@@ -106,14 +116,20 @@ bare-literal reference is an ordinary same-directory include with no such prefix
 
 The point of the rewrite is to remove the codebase's reliance on `$CFG->dirroot` and
 `$CFG->libdir`, which are what currently ties code to a fixed, monolithic directory layout.
-`$CFG->root` (the repository root, as opposed to `$CFG->dirroot`, the app root) is not being
+Resolution against the repository root (as opposed to `$CFG->dirroot`, the app root) is not being
 removed, but it is only ever the right replacement when the *target* isn't owned by any real
 component (marked "root" by the path scan, same as below) — never for a reference that resolves
-into a real, named component.
+into a real, named component. Where this step does emit a root-relative rewrite it emits a
+`\core\component::get_path('<path>')` call, not a bare `$CFG->root . '<path>'` concatenation:
+`get_path()` resolves `<path>` against the repository root itself (`$CFG->root`, or
+`dirname($CFG->dirroot)` as a fallback), so routing through it keeps every rewritten call site free
+of a `global $CFG` of its own and keeps the root-resolution logic in one place. It is one of the
+`core\component` methods the step-1 patches expose for exactly this purpose (see "the `component`
+category" above).
 
 Which rule applies to a given reference depends on whether the file it appears in is itself an
-**entry point** — a file the entrypoint scan classified as a bootstrap file, a CLI script, or a
-page (all three count).
+**entry point** — a file the entrypoint scan classified at all, as `cli`, `other` or
+`bootstrap-dependency` (all three count).
 
 #### Non-entry-point source files
 
@@ -134,13 +150,14 @@ page (all three count).
   `\core\component::component_path()` (see argument rules below).
 - **Different component, target is the "root" placeholder**: the source file belongs to a real
   component but the target doesn't belong to any — `component_path()` can't be used since "root"
-  isn't a real component that exists at run time. Rewrite these to use `$CFG->root` instead: the
-  expression becomes `$CFG->root . '<path>'`, where `<path>` is the target's already-resolved
-  path-in-component value for the "root" pseudo-component, used verbatim, with no trimming — since
-  "root"'s own directory *is* the repository root, that value is already the whole reference minus
-  `$CFG->root` itself, byte-for-byte, the same way the original `$CFG->dirroot`/`$CFG->root`
-  reference was written. (Unlike `component_path()`'s second argument, this is a concatenation, not
-  a separate function argument, so there is no leading `/` to trim.)
+  isn't a real component that exists at run time. Rewrite these to a `\core\component::get_path()`
+  call instead: the expression becomes `\core\component::get_path('<path>')`, where `<path>` is the
+  target's already-resolved path-in-component value for the "root" pseudo-component, used verbatim
+  with a leading `/` spliced on — since "root"'s own directory *is* the repository root, that value
+  is already the whole reference minus the repository root itself, byte-for-byte, the same way the
+  original `$CFG->dirroot`/`$CFG->root` reference was written. (Unlike `component_path()`'s second
+  argument, the leading `/` is kept rather than trimmed: `get_path()` strips it internally, so the
+  value is passed exactly as resolved.)
 
 #### Entry-point source files
 
@@ -152,17 +169,26 @@ neither side of that relationship is going anywhere once components start being 
 *how entry points themselves get deployed* isn't settled the way component boundaries are. Today an
 entry point is a real script sitting directly in the deployed layout; this project might later
 replace that with something else (e.g. a routing shim in its place, with the actual file packaged
-alongside the rest of its component instead). `component_path()`/`$CFG->root` keep resolving
+alongside the rest of its component instead). `component_path()`/`get_path()` keep resolving
 correctly under whatever that ends up being, because they go through the same lookup machinery
 `core\component` itself uses; a hard-coded `__DIR__` climb only keeps working for as long as the
 entry point stays exactly where it is today, and every one of them would have to be found and
 rewritten again the moment it doesn't. The one exception is the reference to `config.php` itself,
-which can never be rewritten to `component_path()`/`$CFG->root` (it's how the application boots,
+which can never be rewritten to `component_path()`/`get_path()` (it's how the application boots,
 before any component-resolution machinery exists to rewrite it *to*) — but, unlike everything else
 in this section, that has nothing to do with entry-point status, and doesn't mean it's left alone
 entirely; see "config.php rewriting" below. That exception is already handled upstream of this
 step: any reference that resolves to a config.php location is always categorised `config`,
 regardless of the source file, so it never reaches this section's rules in the first place.
+
+A bare-literal reference sitting in a file's own pre-component code is a second, narrower version
+of the same exception, and for the identical reason: `component_path()`/`get_path()` don't exist
+yet at that point in the bootstrap sequence either, regardless of the fact that the file containing
+it is, like every file this classification covers, itself an entry point. See
+"pre-component-literal rewriting" below. This one is also already handled upstream — any such
+reference is always categorised `pre-component-literal`, never reaching this section's rules — so,
+same as the `config.php` case, it isn't actually a gap in the "never `__DIR__`-relative" rule
+above, just a reference this section's rules never see.
 
 Every other reference in an entry point follows exactly the same rule as it would in a
 non-entry-point file (same-component/real, same-component/root, different-component/real,
@@ -172,8 +198,8 @@ their `__DIR__`-relative option and gain an entry-point override instead:
 - **Same component, and it's a real, named one, and the source file is an entry point**: rewrite to
   `\core\component::component_path()` instead of a `__DIR__`-relative path.
 - **Same component, and it's the "root" placeholder, and the source file is an entry point**:
-  rewrite to `$CFG->root . '<path>'` instead of a `__DIR__`-relative path — the same replacement,
-  and the same argument rule, as the different-component/root case below; which of the two
+  rewrite to a `\core\component::get_path('<path>')` call instead of a `__DIR__`-relative path — the
+  same replacement, and the same argument rule, as the different-component/root case below; which of the two
   same-component cases applies here makes no difference to the result once the source is an entry
   point.
 
@@ -183,21 +209,23 @@ both.
 
 #### Entry-point target files
 
-A reference whose *target* — not its source — is itself a page, CLI script or bootstrap file gets
-`$CFG->root . '<path>'` too, regardless of which component the target nominally belongs to and
-regardless of the source's own entry-point status. This overrides every rule above, including the
-same-component/real case: `<path>` here is the target's own plain repository-relative path (e.g.
-`/public/lib/setup.php`), not a path relative to the source, and not a path within whatever
-component the target resolves into for packaging purposes.
+A reference whose *target* — not its source — is itself an entry point (`cli`, `other` or
+`bootstrap-dependency`) gets a `\core\component::get_path('<path>')` call too, regardless of which
+component the target nominally belongs to and regardless of the source's own entry-point status. This overrides every
+rule above, including the same-component/real case: `<path>` here is the target's own plain
+repository-relative path (e.g. `/public/lib/setup.php`), not a path relative to the source, and not
+a path within whatever component the target resolves into for packaging purposes.
 
 Entry points end up placed at their original repository-relative path directly under the project
-root by a step outside this tool's own scope (a not-yet-written Composer plugin), because a page or
-CLI script needs to sit at a fixed, predictable path for a web server or `php` invocation to find
-it, and a bootstrap file specifically must be loadable before `core\component` exists to resolve
-anything through. The same file also still gets copied into its nominal component's own package by
-the tooling that builds those packages, which has no awareness of entry-point status — but that
-copy is inert; the plugin-placed one is the only one that's ever safe to load. A `__DIR__`-relative
-or `component_path()` reference would resolve into the inert package copy instead, and if the entry
+root by a step outside this tool's own scope (a not-yet-written Composer plugin) — every one of
+them needs a fixed, predictable location, whether because something outside the codebase (a web
+server, cron, a `php` invocation) finds it directly by path, because it must be loadable before
+`core\component` exists to resolve anything through, or both; the graph gives no reliable way to
+tell those reasons apart file by file, so every entry point is treated the same regardless of which
+applies. The same file also still gets copied into its nominal component's own package by the
+tooling that builds those packages, which has no awareness of entry-point status — but that copy is
+inert; the plugin-placed one is the only one that's ever safe to load. A `__DIR__`-relative or
+`component_path()` reference would resolve into the inert package copy instead, and if the entry
 point's real copy is also loaded elsewhere in the same request — which it usually will be, since
 it's an entry point — PHP fatals on redeclaring the same classes/functions from two different files.
 
@@ -236,13 +264,14 @@ rooted at `$CFG->dirroot` turns out to live inside the two files the `component`
 A `config` reference is rewritten to a path relative to `__DIR__`, using exactly the same mechanics
 as the non-entry-point same-component case above — even though the file containing it is, by
 definition, always an entry point (an entry point is exactly a file that requires config.php,
-directly or transitively). Nothing else in this spec gives an entry point a `__DIR__`-relative
-path; this is deliberately the one exception, for two reasons specific to config.php and nothing
-else:
+directly or transitively). Nothing else in this spec gives an *ordinary* entry-point reference a
+`__DIR__`-relative path; this is deliberately the one exception among those (see
+"pre-component-literal rewriting" below for the other, narrower one, specific to bootstrap files'
+own pre-component code), for two reasons specific to config.php and nothing else:
 
 - There is no more-robust alternative being given up. Every other entry-point override exists
-  because `component_path()`/`$CFG->root` are *available* and more robust than `__DIR__`, so using
-  `__DIR__` instead would be a needless downgrade. For config.php, `component_path()`/`$CFG->root`
+  because `component_path()`/`get_path()` are *available* and more robust than `__DIR__`, so using
+  `__DIR__` instead would be a needless downgrade. For config.php, `component_path()`/`get_path()`
   are never available in the first place — component.php doesn't exist yet at the point config.php
   is required — so there is nothing more robust to give up.
 - It introduces no new fragility. A reference to config.php almost always starts as a bare relative
@@ -253,6 +282,37 @@ else:
 A `config` reference that's already `__DIR__`-relative has nothing left to do. Otherwise (a bare
 literal, or written on `$CFG->dirroot`/`$CFG->root`) it's rewritten the same way as any other
 `__DIR__`-relative case — see "`__DIR__`-relative path mechanics" below.
+
+#### `pre-component-literal` rewriting
+
+A bootstrap file's own pre-component code — the lines that run before `core\component` exists, see
+"the `component` category" above — is otherwise left completely untouched by this step, on the
+grounds that whatever form a reference there is written in today is already permanent: the
+mechanism this whole project relies on for splitting code into packages is `core\component` acting
+as the oracle for where every component lives, and pre-component code by definition runs before
+that oracle exists, so none of it is ever a candidate for splitting in the first place. That holds
+for a reference written on `$CFG->dirroot`/`$CFG->root`, or one that's already `__DIR__`-relative —
+either way, it resolves the same way regardless of where the codebase's other components end up.
+
+It does not hold for a bare string literal (e.g. `require_once('setuplib.php')`, as opposed to
+`require_once($CFG->libdir . '/setuplib.php')` or an already-`__DIR__`-relative equivalent). A bare
+literal like this is resolved by PHP at run time through a fallback it only reaches *after* first
+searching the include path: the directory of the file containing the require. That fallback lands
+correctly today only because the referencing bootstrap file and whatever it's requiring both still
+sit exactly where they always have. Once bootstrap files are split into per-component packages,
+only the bootstrap file itself is placed back at its original location (see "Entry-point target
+files" above); an ordinary sibling file it reaches this way is not — it only exists inside its own
+component's package — so the same fallback resolution would silently fail to find it. Leaving the
+literal exactly as written is therefore not actually safe the way it is for every other shape of
+pre-component reference, so this one shape is carved out into its own category and rewritten.
+
+A `pre-component-literal` reference is rewritten to a path relative to `__DIR__`, using exactly the
+same mechanics as the `config` case above, and for the identical reason: `component_path()`/
+`get_path()` are equally unavailable this early, whether or not the literal's own target happens to
+be another bootstrap file. This holds unconditionally — unlike every other rewritten category, it
+is never overridden by either side's entry-point status (see "Entry-point source files" and
+"Entry-point target files" above): a bootstrap file is always an entry point, so a rule that
+deferred to entry-point status here would defeat the category's own purpose.
 
 #### `component_path()` arguments
 
@@ -273,11 +333,20 @@ blur them together:
   its own — a lone separator is entirely a trailing separator, so the "never trim trailing" rule
   already leaves it alone.)
 
+#### `get_path()` argument
+
+`\core\component::get_path($path)`, where `$path` is the target's plain repository-relative path
+with a single leading `/` spliced on (e.g. `\core\component::get_path('/public/lib/setup.php')`).
+Unlike `component_path()`'s second argument there is no three-way rule and nothing to trim:
+`get_path()` `ltrim()`s the leading `/` itself and joins the rest onto the repository root, so the
+resolved value is byte-for-byte what the original `$CFG->dirroot`/`$CFG->root` reference produced.
+A trailing separator, if the original had one, is preserved the same way.
+
 #### `__DIR__`-relative path mechanics
 
 When a reference is rewritten to be relative to `__DIR__` (the non-entry-point same-component case
 above, and the `config.php` case, which are the only cases that call for this rather than
-`component_path()` or `$CFG->root`), the replacement expression is built like this:
+`component_path()` or `\core\component::get_path()`), the replacement expression is built like this:
 
 - Find the longest directory prefix the source file's own directory shares with the target path —
   i.e. the deepest ancestor directory that contains both. `N` is how many directory levels lie
