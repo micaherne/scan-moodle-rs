@@ -1,0 +1,18 @@
+diff --git a/public/admin/tool/componentlibrary/index.php b/public/admin/tool/componentlibrary/index.php
+index 6148e9f72fa..301e3a2d5c9 100644
+--- a/public/admin/tool/componentlibrary/index.php
++++ b/public/admin/tool/componentlibrary/index.php
+@@ -48,11 +48,12 @@ $validroots = [
+ ];
+ 
+ if (in_array($docs, $validroots)) {
++    $plugindir = \core\component::get_plugin_directory('tool', 'componentlibrary');
+     $docspage = '/' . implode(
+         '/',
+         array_filter(array_map(
+             fn($part) => trim($part, '/'),
+-            [$CFG->dirroot, $docsdir, $docs, $folder, $section, 'index.html']
++            [$plugindir, 'docs', $docs, $folder, $section, 'index.html']
+         ))
+     );
+ }
