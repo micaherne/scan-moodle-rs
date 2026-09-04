@@ -13,6 +13,7 @@ use super::output::AuditWriter;
 
 /// Rewrites every eligible reference among `references` directly on the files under `root`.
 /// Eligibility is [`is_eligible`]'s — [`crate::moodle::categorise::PathCategory::Config`],
+/// [`crate::moodle::categorise::PathCategory::PreComponentLiteral`],
 /// [`crate::moodle::categorise::PathCategory::StaticSameComponent`],
 /// [`crate::moodle::categorise::PathCategory::StaticDifferentComponent`] and
 /// [`crate::moodle::categorise::PathCategory::VariableOnly`]. Every other category is skipped, as
@@ -187,6 +188,56 @@ mod tests {
         assert_eq!(
             fs::read_to_string(root.join("public/mod/quiz/view.php")).unwrap(),
             "<?php\nrequire_once(__DIR__ . '/lib.php');\nrequire_once(__DIR__ . '/locallib.php');\n"
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A pre-component bare literal is rewritten to `__DIR__`-relative even when its target is
+    /// itself a bootstrap file (which would otherwise force a `\core\component::get_path()` call,
+    /// the way it does for an ordinary `StaticSameComponent`/`StaticDifferentComponent` reference) —
+    /// `core\component` isn't loaded yet this early, so the entry-point-target override must never
+    /// reach this category.
+    #[test]
+    fn a_pre_component_literal_targeting_a_bootstrap_file_still_gets_dir_relative() {
+        let root = temp_dir("pre-component-literal");
+        write_file(
+            &root,
+            "public/lib/setup.php",
+            "<?php\nrequire_once('component.php');\n",
+        );
+
+        let source = fs::read_to_string(root.join("public/lib/setup.php")).unwrap();
+        let notation = PathNotation::new("public/");
+        let mut results = find_paths(&source, "public/lib/setup.php", &notation);
+        assert_eq!(results.len(), 1);
+        // The bare literal resolves relative to the referencing file's own directory, exactly the
+        // shape `dir_relative_expression` is being exercised against below.
+        assert_eq!(results[0].real_path, "public/lib/component.php");
+
+        let reference = CategorisedReference {
+            file: "public/lib/setup.php".to_string(),
+            result: results.remove(0),
+            source_component: None,
+            // `target` is irrelevant to this category — decide() never looks at it — but supplied
+            // for realism: `component.php` really is a bootstrap file (it's `core\component` itself).
+            target: Some(Resolution {
+                component: "core".to_string(),
+                path_in_component: "/component.php".to_string(),
+            }),
+            category: PathCategory::PreComponentLiteral,
+        };
+
+        let entry_point_files = HashSet::from([
+            "public/lib/setup.php".to_string(),
+            "public/lib/component.php".to_string(),
+        ]);
+        let rewritten = apply(&root, &[reference], &entry_point_files, None).unwrap();
+
+        assert_eq!(rewritten, 1);
+        assert_eq!(
+            fs::read_to_string(root.join("public/lib/setup.php")).unwrap(),
+            "<?php\nrequire_once(__DIR__ . '/component.php');\n"
         );
 
         fs::remove_dir_all(&root).ok();

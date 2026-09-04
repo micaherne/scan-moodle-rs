@@ -7,7 +7,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use crate::moodle::entrypoints::{EntrypointKind, FileClassification};
+use crate::moodle::entrypoints::{BootstrapKind, FileClassification};
 use crate::moodle::resolver::{ComponentResolver, ROOT_COMPONENT};
 
 use super::copy::component_dir_name;
@@ -36,8 +36,8 @@ const LICENSE: &str = "GPL-3.0-or-later";
 /// solely to support running tests unconditionally autoloadable for every consumer of `core`,
 /// whether or not they're running any tests at all — a real architectural wrongness, not just a
 /// style nitpick, even though the practical cost (a couple of always-registered autoload entries)
-/// is negligible. The properly-separated fix — e.g. a dedicated testing package `core` only pulls
-/// in for test scenarios — hasn't been designed. Revisit before this is treated as final.
+/// is negligible. There's no properly-separated fix in place; this is a known compromise, kept as
+/// one deliberately rather than solved further.
 const CORE_TESTING_AUTOLOAD: [(&str, &str); 2] = [
     ("core_testing\\", "testing/classes/"),
     ("core_phpunit\\", "phpunit/classes/"),
@@ -68,26 +68,36 @@ struct Extra {
 
 #[derive(Serialize)]
 struct MoodleExtra {
-    entrypoints: Entrypoints,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    component: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    entrypoints: Option<Entrypoints>,
 }
 
-/// One component's entry points, grouped by kind, in the shape `extra.moodle.entrypoints` takes.
-/// Each path is relative to the component's own root, with no leading slash. An empty `Vec` is
-/// skipped entirely when serialising — see [`Entrypoints::is_empty`] for why a wholly-empty one is
-/// never serialised at all.
+/// One component's bootstrap-relevant files, grouped by kind, in the shape
+/// `extra.moodle.entrypoints` takes. Each path is relative to the component's own root, with no
+/// leading slash. An empty `Vec` is skipped entirely when serialising — see
+/// [`Entrypoints::is_empty`] for why a wholly-empty one is never serialised at all.
+///
+/// Only two buckets: [`BootstrapKind::Cli`] gets its own, since a sysadmin or cron job invokes
+/// those directly and needs to know which files that is true of. Everything else —
+/// [`BootstrapKind::Other`] and [`BootstrapKind::BootstrapDependency`] alike — lands in `other`:
+/// this metadata exists purely to tell a Composer plugin which files must be physically placed
+/// back at a fixed location, and both of those kinds need exactly that, for exactly the same
+/// reason (neither can be found through `core\component` once split into a package). There is no
+/// programmatic way to tell an ordinary page apart from internal framework plumbing that happens
+/// to reach the boundary the same way, so this project doesn't try to.
 #[derive(Default, Serialize)]
 pub(super) struct Entrypoints {
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    page: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     cli: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    bootstrap: Vec<String>,
+    other: Vec<String>,
 }
 
 impl Entrypoints {
     fn is_empty(&self) -> bool {
-        self.page.is_empty() && self.cli.is_empty() && self.bootstrap.is_empty()
+        self.cli.is_empty() && self.other.is_empty()
     }
 }
 
@@ -95,9 +105,10 @@ impl Entrypoints {
 /// [`crate::moodle::resolver::Resolution::path_in_component`] always carries — composer.json wants
 /// a plain relative path, not this project's own internal convention. Entries resolving into
 /// `root` (or not resolving to a real, non-empty path within a component at all) are dropped
-/// entirely: `moodle-root`'s package never carries entrypoint metadata, regardless of which files
-/// happen to live there — it's intended to be copied wholesale into a user's Moodle project by a
-/// (not yet written) Composer plugin, not consumed via ordinary Composer autoloading.
+/// entirely: there would be nothing to do with them if they were kept — [`write_root`], unlike
+/// [`write`], has no `extra.moodle.entrypoints` field to put them in, so a `root` entry in the map
+/// this builds would just go unread. `moodle-root` is an ordinary Composer package like every other
+/// one this tool produces — it just doesn't carry this particular piece of metadata today.
 pub(super) fn group_by_component(
     entry_points: &[FileClassification],
     resolver: &ComponentResolver,
@@ -119,18 +130,33 @@ pub(super) fn group_by_component(
             .to_string();
         let bucket = by_component.entry(resolution.component).or_default();
         match classification.kind {
-            EntrypointKind::Page => bucket.page.push(path),
-            EntrypointKind::Cli => bucket.cli.push(path),
-            EntrypointKind::Bootstrap => bucket.bootstrap.push(path),
+            BootstrapKind::Cli => bucket.cli.push(path),
+            BootstrapKind::Other | BootstrapKind::BootstrapDependency => bucket.other.push(path),
         }
     }
     by_component
 }
 
+/// `moodlehq/moodle-<component>` — the package name every component's own `composer.json` (real
+/// or `root`) is written with. Shared with [`write_metapackage`] so the dependencies it lists can
+/// never drift out of sync with what each package actually calls itself.
+fn package_name(component: &str) -> String {
+    format!("{VENDOR}/{}", component_dir_name(component))
+}
+
 /// Writes `component`'s `composer.json` into `package_dir` — for a real component only; `root`
 /// goes through [`write_root`] instead, which starts from Moodle's own upstream file rather than
-/// building one from scratch. `extra.moodle.entrypoints` is omitted entirely (not written as an
-/// empty object) when `entry_points` is `None` or empty.
+/// building one from scratch.
+///
+/// `extra.moodle.component` is written only when `package_dir` (already fully populated by the
+/// copy step that runs before this) has no `version.php` of its own: a plugin can be named from
+/// its own `version.php` at runtime — Composer's own plugin-type handler reads it — and setting
+/// `extra.moodle.component` as well on a package that already has one is not just redundant but
+/// flagged and ignored by Moodle's Composer plugin. A subsystem (e.g. `core_completion`) has no
+/// `version.php` to read, so its component name has to come from here instead. `extra` itself
+/// (and `extra.moodle`) is omitted entirely when it would otherwise end up empty.
+/// `extra.moodle.entrypoints` is likewise omitted (not written as an empty object) when
+/// `entry_points` is `None` or empty.
 pub(super) fn write(
     package_dir: &Path,
     component: &str,
@@ -141,6 +167,7 @@ pub(super) fn write(
         "the root package goes through write_root instead"
     );
     let entry_points = entry_points.filter(|entrypoints| !entrypoints.is_empty());
+    let component_name = (!package_dir.join("version.php").exists()).then(|| component.to_string());
 
     let mut psr4 = BTreeMap::from([(format!("{component}\\"), "classes/".to_string())]);
     // See CORE_TESTING_AUTOLOAD's own doc comment for why this is here and why it's not great.
@@ -152,14 +179,19 @@ pub(super) fn write(
         );
     }
 
+    let extra = (component_name.is_some() || entry_points.is_some()).then_some(Extra {
+        moodle: MoodleExtra {
+            component: component_name,
+            entrypoints: entry_points,
+        },
+    });
+
     let composer = ComposerJson {
-        name: format!("{VENDOR}/{}", component_dir_name(component)),
+        name: package_name(component),
         package_type: "moodle-component",
         license: LICENSE,
         autoload: Some(Autoload { psr4 }),
-        extra: entry_points.map(|entrypoints| Extra {
-            moodle: MoodleExtra { entrypoints },
-        }),
+        extra,
     };
 
     let json = serde_json::to_string_pretty(&composer).expect("ComposerJson always serialises");
@@ -192,7 +224,7 @@ pub(super) fn write_root(package_dir: &Path) -> io::Result<()> {
         .expect("filtered to an object above, or just built one");
     object.insert(
         "name".to_string(),
-        serde_json::Value::String(format!("{VENDOR}/{}", component_dir_name(ROOT_COMPONENT))),
+        serde_json::Value::String(package_name(ROOT_COMPONENT)),
     );
     object.insert(
         "type".to_string(),
@@ -204,6 +236,51 @@ pub(super) fn write_root(package_dir: &Path) -> io::Result<()> {
 
     let json = serde_json::to_string_pretty(&composer).expect("a JSON object always serialises");
     fs::write(path, format!("{json}\n"))
+}
+
+/// `moodle-standard`'s own directory/package name — `moodle-standard` isn't a real component
+/// [`component_dir_name`] would ever produce on its own, it's fabricated purely for this one
+/// metapackage, so it's spelled out here rather than derived.
+pub(super) const METAPACKAGE_DIR_NAME: &str = "moodle-standard";
+
+#[derive(Serialize)]
+struct Metapackage {
+    name: String,
+    #[serde(rename = "type")]
+    package_type: &'static str,
+    license: &'static str,
+    require: BTreeMap<String, String>,
+}
+
+/// Writes the `moodle-standard` metapackage's `composer.json` into `package_dir`: a single package
+/// that requires every one of `components` (every component this run actually produced a package
+/// for — `root` included, via [`ROOT_COMPONENT`]), so that requiring just `moodle-standard` pulls
+/// in the whole split-up codebase. Composer's own `metapackage` type is used deliberately — it
+/// tells Composer there is no code of its own to install, only dependencies to resolve, which
+/// matches what this directory actually contains (nothing but this one file).
+///
+/// Every dependency is constrained to `*`. None of these packages ever get a tagged version (see
+/// `git.rs`'s own doc comment: each one is `dev-main` and nothing else), so whatever project ends
+/// up requiring `moodle-standard` needs `minimum-stability: dev` regardless of what constraint is
+/// written here — there is no tagged version `*` could otherwise prefer instead.
+pub(super) fn write_metapackage(
+    package_dir: &Path,
+    components: impl IntoIterator<Item = impl AsRef<str>>,
+) -> io::Result<()> {
+    let require = components
+        .into_iter()
+        .map(|component| (package_name(component.as_ref()), "*".to_string()))
+        .collect();
+
+    let composer = Metapackage {
+        name: format!("{VENDOR}/{METAPACKAGE_DIR_NAME}"),
+        package_type: "metapackage",
+        license: LICENSE,
+        require,
+    };
+
+    let json = serde_json::to_string_pretty(&composer).expect("Metapackage always serialises");
+    fs::write(package_dir.join("composer.json"), format!("{json}\n"))
 }
 
 #[cfg(test)]
@@ -241,11 +318,11 @@ mod tests {
         discover_components(root).unwrap()
     }
 
-    fn classification(file: &str, kind: EntrypointKind) -> FileClassification {
+    fn classification(file: &str, kind: BootstrapKind) -> FileClassification {
         FileClassification {
             file: file.to_string(),
             kind,
-            line: None,
+            extent: None,
         }
     }
 
@@ -256,18 +333,30 @@ mod tests {
         let resolver = ComponentResolver::new(&discovered);
 
         let entry_points = vec![
-            classification("mod/quiz/view.php", EntrypointKind::Page),
-            classification("mod/quiz/cli/upgrade.php", EntrypointKind::Cli),
-            classification("lib/setup.php", EntrypointKind::Bootstrap),
+            classification("mod/quiz/view.php", BootstrapKind::Other),
+            classification("mod/quiz/cli/upgrade.php", BootstrapKind::Cli),
+            classification("lib/setup.php", BootstrapKind::Other),
+            classification(
+                "lib/phpminimumversionlib.php",
+                BootstrapKind::BootstrapDependency,
+            ),
             // Resolves to root — must be dropped, not attributed to any package.
-            classification("config.php", EntrypointKind::Page),
+            classification("config.php", BootstrapKind::Other),
         ];
 
         let grouped = group_by_component(&entry_points, &resolver);
 
-        assert_eq!(grouped["mod_quiz"].page, vec!["view.php".to_string()]);
+        assert_eq!(grouped["mod_quiz"].other, vec!["view.php".to_string()]);
         assert_eq!(grouped["mod_quiz"].cli, vec!["cli/upgrade.php".to_string()]);
-        assert_eq!(grouped["core"].bootstrap, vec!["setup.php".to_string()]);
+        // Other and BootstrapDependency land in the same bucket — see `Entrypoints`'s own doc
+        // comment for why the split isn't carried through to composer.json.
+        assert_eq!(
+            grouped["core"].other,
+            vec![
+                "setup.php".to_string(),
+                "phpminimumversionlib.php".to_string()
+            ]
+        );
         assert!(!grouped.contains_key(ROOT_COMPONENT));
 
         fs::remove_dir_all(&root).ok();
@@ -277,7 +366,7 @@ mod tests {
     fn real_component_gets_autoload_and_entrypoints() {
         let dir = temp_dir("write-component");
         let mut entry_points = Entrypoints::default();
-        entry_points.page.push("view.php".to_string());
+        entry_points.other.push("view.php".to_string());
 
         write(&dir, "mod_quiz", Some(entry_points)).unwrap();
 
@@ -287,8 +376,9 @@ mod tests {
         assert_eq!(value["type"], "moodle-component");
         assert_eq!(value["license"], "GPL-3.0-or-later");
         assert_eq!(value["autoload"]["psr-4"]["mod_quiz\\"], "classes/");
+        assert_eq!(value["extra"]["moodle"]["component"], "mod_quiz");
         assert_eq!(
-            value["extra"]["moodle"]["entrypoints"]["page"][0],
+            value["extra"]["moodle"]["entrypoints"]["other"][0],
             "view.php"
         );
         assert!(value["extra"]["moodle"]["entrypoints"].get("cli").is_none());
@@ -334,15 +424,67 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    /// `extra.moodle.component` is written when the package has no `version.php` of its own —
+    /// mirroring a subsystem, which has none to name itself from at runtime — even with no entry
+    /// points. Only `extra.moodle.entrypoints` is conditional on entry points existing.
     #[test]
-    fn component_with_no_entry_points_omits_extra_entirely() {
+    fn component_with_no_version_php_and_no_entry_points_still_gets_extra_moodle_component() {
         let dir = temp_dir("write-no-entrypoints");
 
         write(&dir, "mod_quiz", None).unwrap();
 
         let content = fs::read_to_string(dir.join("composer.json")).unwrap();
         let value: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(value["extra"]["moodle"]["component"], "mod_quiz");
+        assert!(value["extra"]["moodle"].get("entrypoints").is_none());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A package that already has its own `version.php` (a real plugin, not a subsystem) must not
+    /// also get `extra.moodle.component`: Moodle's Composer plugin reads the component name from
+    /// `version.php` in that case, and warns that `extra.moodle.component` is being ignored if
+    /// it's set as well. With no entry points either, `extra` ends up wholly empty and is omitted.
+    #[test]
+    fn component_with_version_php_and_no_entry_points_omits_extra_entirely() {
+        let dir = temp_dir("write-with-version-php");
+        write_file(
+            &dir,
+            "version.php",
+            "<?php\n$plugin->component = 'mod_quiz';\n",
+        );
+
+        write(&dir, "mod_quiz", None).unwrap();
+
+        let content = fs::read_to_string(dir.join("composer.json")).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&content).unwrap();
         assert!(value.get("extra").is_none());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Same as above, but with entry points: `extra.moodle.entrypoints` still has to be written
+    /// (nothing else carries that metadata), just without `component` alongside it.
+    #[test]
+    fn component_with_version_php_keeps_entrypoints_but_omits_component() {
+        let dir = temp_dir("write-with-version-php-and-entrypoints");
+        write_file(
+            &dir,
+            "version.php",
+            "<?php\n$plugin->component = 'mod_quiz';\n",
+        );
+        let mut entry_points = Entrypoints::default();
+        entry_points.other.push("view.php".to_string());
+
+        write(&dir, "mod_quiz", Some(entry_points)).unwrap();
+
+        let content = fs::read_to_string(dir.join("composer.json")).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert!(value["extra"]["moodle"].get("component").is_none());
+        assert_eq!(
+            value["extra"]["moodle"]["entrypoints"]["other"][0],
+            "view.php"
+        );
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -419,6 +561,50 @@ mod tests {
                 "autoload-dev"
             ],
             "key order should match the upstream file, not be alphabetised"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn metapackage_requires_every_component_by_its_own_package_name() {
+        let dir = temp_dir("write-metapackage");
+
+        write_metapackage(&dir, ["mod_quiz", "core", ROOT_COMPONENT]).unwrap();
+
+        let content = fs::read_to_string(dir.join("composer.json")).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(value["name"], "moodlehq/moodle-standard");
+        assert_eq!(value["type"], "metapackage");
+        assert_eq!(value["license"], "GPL-3.0-or-later");
+        assert_eq!(value["require"]["moodlehq/moodle-mod_quiz"], "*");
+        assert_eq!(value["require"]["moodlehq/moodle-core"], "*");
+        assert_eq!(value["require"]["moodlehq/moodle-root"], "*");
+        assert!(value.get("autoload").is_none());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `require` is a `BTreeMap`, so this is really pinning `serde_json`'s own behaviour, but it's
+    /// worth pinning explicitly: a metapackage listing hundreds of dependencies is only usable if
+    /// they're easy to scan, and insertion order (`components_used` is a `HashSet`, so this would
+    /// otherwise be arbitrary and vary from run to run) would defeat that.
+    #[test]
+    fn metapackage_requires_are_sorted_alphabetically() {
+        let dir = temp_dir("write-metapackage-sorted");
+
+        write_metapackage(&dir, ["mod_quiz", "core", "auth_manual"]).unwrap();
+
+        let content = fs::read_to_string(dir.join("composer.json")).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let keys: Vec<&String> = value["require"].as_object().unwrap().keys().collect();
+        assert_eq!(
+            keys,
+            vec![
+                "moodlehq/moodle-auth_manual",
+                "moodlehq/moodle-core",
+                "moodlehq/moodle-mod_quiz",
+            ]
         );
 
         fs::remove_dir_all(&dir).ok();

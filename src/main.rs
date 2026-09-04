@@ -11,7 +11,7 @@ use rayon::prelude::*;
 #[cfg(feature = "rewrite")]
 use scan_moodle::extract_packages;
 use scan_moodle::moodle;
-use scan_moodle::moodle::entrypoints::EntrypointKind;
+use scan_moodle::moodle::entrypoints::BootstrapKind;
 use scan_moodle::moodle::resolver::ComponentResolver;
 use scan_moodle::moodle::scan::{Scan, categorise_all};
 #[cfg(feature = "rewrite")]
@@ -63,19 +63,17 @@ enum Commands {
         #[arg(long = "type-dirs")]
         type_dirs: bool,
     },
-    /// Identify Moodle "entry point" (page/CLI) and "bootstrap" files from the codebase's
-    /// require/include graph
+    /// Identify every file in a Moodle codebase's require/include graph that must be placed back
+    /// at a fixed location rather than found through `core\component` — split into `cli` (lives
+    /// under a 'cli' directory), `other` (everything else that reaches component.php directly,
+    /// pages included), and `bootstrap-dependency` (never reaches component.php itself, only
+    /// loaded before some other file's own boundary line runs)
     FindEntrypoints {
         /// Path to the Moodle codebase to scan
         root: PathBuf,
         /// Write CSV output to this file instead of stdout
         #[arg(short = 'o', long = "output-file")]
         output_file: Option<PathBuf>,
-        /// Only report files reachable without the synthetic config.php requires chain, which by
-        /// default sweeps every entry point into the bootstrap set too (every page reaches
-        /// component.php via config.php)
-        #[arg(long = "bootstrap-only")]
-        bootstrap_only: bool,
     },
     /// Rewrite a Moodle codebase to remove its reliance on $CFG->dirroot/$CFG->libdir (only
     /// available when the `rewrite` feature is enabled). Mutates `root` in place — see
@@ -163,22 +161,13 @@ fn sanitize(field: &str) -> String {
 fn format_summary(
     scanned: usize,
     elapsed: std::time::Duration,
-    entrypoint_count: usize,
-    bootstrap_count: usize,
-    bootstrap_only: bool,
+    cli_count: usize,
+    other_count: usize,
+    dependency_count: usize,
 ) -> String {
-    if bootstrap_only {
-        format!(
-            "Scanned {scanned} PHP files in {elapsed:.2?}, found {bootstrap_count} bootstrap file{}",
-            if bootstrap_count == 1 { "" } else { "s" }
-        )
-    } else {
-        format!(
-            "Scanned {scanned} PHP files in {elapsed:.2?}, found {entrypoint_count} entry point{} and {bootstrap_count} bootstrap file{}",
-            if entrypoint_count == 1 { "" } else { "s" },
-            if bootstrap_count == 1 { "" } else { "s" }
-        )
-    }
+    format!(
+        "Scanned {scanned} PHP files in {elapsed:.2?}, found {cli_count} cli, {other_count} other, {dependency_count} bootstrap-dependency files"
+    )
 }
 
 fn main() -> ExitCode {
@@ -201,11 +190,9 @@ fn main() -> ExitCode {
             output_file,
             type_dirs,
         } => find_components_command(&root, output_file.as_deref(), type_dirs),
-        Commands::FindEntrypoints {
-            root,
-            output_file,
-            bootstrap_only,
-        } => find_entrypoints_command(&root, output_file.as_deref(), bootstrap_only),
+        Commands::FindEntrypoints { root, output_file } => {
+            find_entrypoints_command(&root, output_file.as_deref())
+        }
         #[cfg(feature = "rewrite")]
         Commands::RewriteMoodle { root, output_dir } => rewrite::run(&root, output_dir.as_deref()),
         #[cfg(feature = "rewrite")]
@@ -397,11 +384,7 @@ fn find_components_command(root: &Path, output_file: Option<&Path>, type_dirs: b
     ExitCode::SUCCESS
 }
 
-fn find_entrypoints_command(
-    root: &Path,
-    output_file: Option<&Path>,
-    bootstrap_only: bool,
-) -> ExitCode {
+fn find_entrypoints_command(root: &Path, output_file: Option<&Path>) -> ExitCode {
     let discovered = match discover_or_exit(root) {
         Ok(discovered) => discovered,
         Err(code) => return code,
@@ -409,13 +392,12 @@ fn find_entrypoints_command(
 
     let start = Instant::now();
 
-    // Unlike find-paths, this needs every file's results in memory at once, since the
-    // bootstrap/entry-point closures are graph reachability queries over the whole codebase, not
-    // a per-file computation that can be streamed out as it's found.
+    // Unlike find-paths, this needs every file's results in memory at once, since the underlying
+    // closures are graph reachability queries over the whole codebase, not a per-file computation
+    // that can be streamed out as it's found.
     let scan = Scan::from_discovery(root, discovered);
     let scanned = scan.files.len();
-    let classifications =
-        moodle::entrypoints::classify(&scan.files, &scan.notation, bootstrap_only);
+    let classifications = moodle::entrypoints::classify(&scan.files, &scan.notation);
 
     let mut csv_writer = match create_csv_writer(output_file, &["file", "kind", "line"]) {
         Ok(writer) => writer,
@@ -425,27 +407,25 @@ fn find_entrypoints_command(
         let record = vec![
             sanitize(&classification.file),
             classification.kind.to_string(),
-            opt_to_string(classification.line),
+            opt_to_string(classification.extent.clone()),
         ];
         csv_writer.write_record(record).ok();
     }
     csv_writer.flush().ok();
 
     let elapsed = start.elapsed();
-    let bootstrap_count = classifications
+    let cli_count = classifications
         .iter()
-        .filter(|c| c.kind == EntrypointKind::Bootstrap)
+        .filter(|c| c.kind == BootstrapKind::Cli)
         .count();
-    let entrypoint_count = classifications.len() - bootstrap_count;
+    let dependency_count = classifications
+        .iter()
+        .filter(|c| c.kind == BootstrapKind::BootstrapDependency)
+        .count();
+    let other_count = classifications.len() - cli_count - dependency_count;
     eprintln!(
         "{}",
-        format_summary(
-            scanned,
-            elapsed,
-            entrypoint_count,
-            bootstrap_count,
-            bootstrap_only
-        )
+        format_summary(scanned, elapsed, cli_count, other_count, dependency_count)
     );
     if scan.failed_reads > 0 {
         eprintln!("Failed to read {} files", scan.failed_reads);
@@ -460,15 +440,8 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn bootstrap_only_summary_avoids_entry_point_language() {
-        let message = format_summary(12, Duration::from_secs(1), 0, 3, true);
-        assert!(message.contains("found 3 bootstrap files"));
-        assert!(!message.contains("entry point"));
-    }
-
-    #[test]
-    fn default_summary_mentions_entry_points_and_bootstrap_files() {
-        let message = format_summary(12, Duration::from_secs(1), 2, 3, false);
-        assert!(message.contains("found 2 entry points and 3 bootstrap files"));
+    fn summary_mentions_all_three_kinds() {
+        let message = format_summary(12, Duration::from_secs(1), 2, 5, 3);
+        assert!(message.contains("found 2 cli, 5 other, 3 bootstrap-dependency files"));
     }
 }

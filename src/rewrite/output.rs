@@ -177,6 +177,7 @@ mod tests {
                 end_pos: Some(56),
                 separator: "/".to_string(),
                 mono_path_expr: String::new(),
+                scope_end_line: None,
             },
             source_component: Some("mod_quiz".to_string()),
             target: Some(Resolution {

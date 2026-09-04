@@ -1,8 +1,8 @@
 diff --git a/public/lib/classes/component.php b/public/lib/classes/component.php
-index 00dbd507c2f..481650ef4e2 100644
+index 00dbd507c..d065ef9bc 100644
 --- a/public/lib/classes/component.php
 +++ b/public/lib/classes/component.php
-@@ -2094,6 +2094,110 @@ $cache = ' . var_export($cache, true) . ';
+@@ -2094,13 +2094,117 @@ $cache = ' . var_export($cache, true) . ';
          return $haspngmonologo || $hassvgmonologo;
      }
  
@@ -113,3 +113,11 @@ index 00dbd507c2f..481650ef4e2 100644
      /**
       * Returns a path relative to the Moodle root directory.
       *
+      * @param string $path The child path
+      * @return string The full path within the root directory.
+      */
+-    protected static function get_path(string $path = ''): string {
++    public static function get_path(string $path = ''): string {
+         global $CFG;
+ 
+         if (property_exists($CFG, 'root')) {

@@ -3,13 +3,15 @@
 //! Takes a *vanilla* Moodle codebase, runs the whole rewrite process on it in place (see
 //! [`crate::rewrite::execute`]), then copies the result into a directory of self-contained
 //! Composer packages, one per component plus a `moodle-root` catch-all, each with its own git
-//! history and a `composer.json` carrying the metadata a future loader would need.
+//! history and a `composer.json` carrying the metadata a future loader would need — plus one more
+//! package, `moodle-standard`, a metapackage requiring every one of them (see
+//! `composer_json::write_metapackage`).
 
 mod composer_json;
 mod copy;
 mod git;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use rayon::prelude::*;
@@ -104,19 +106,47 @@ pub fn run(root: &Path, dest: &Path, clean: bool, output_dir: Option<&Path>) -> 
         copied.components_used.len()
     );
 
+    // A single metapackage requiring every package just written, `root` included, so that
+    // requiring just this one package pulls in the whole split-up codebase — see
+    // `composer_json::write_metapackage`'s own doc comment.
+    let metapackage_dir = dest.join(composer_json::METAPACKAGE_DIR_NAME);
+    if let Err(err) = std::fs::create_dir_all(&metapackage_dir) {
+        eprintln!(
+            "error: failed to create {}: {err}",
+            metapackage_dir.display()
+        );
+        return ExitCode::FAILURE;
+    }
+    if let Err(err) = composer_json::write_metapackage(&metapackage_dir, &copied.components_used) {
+        eprintln!(
+            "error: failed to write {}'s composer.json: {err}",
+            composer_json::METAPACKAGE_DIR_NAME
+        );
+        return ExitCode::FAILURE;
+    }
+    eprintln!(
+        "Wrote {}, requiring all {} packages",
+        composer_json::METAPACKAGE_DIR_NAME,
+        copied.components_used.len()
+    );
+
     eprintln!("Committing each package to git...");
-    let git_failures: Vec<(String, String)> = copied
+    let package_dirs: Vec<PathBuf> = copied
         .components_used
+        .iter()
+        .map(|component| dest.join(copy::component_dir_name(component)))
+        .chain(std::iter::once(metapackage_dir))
+        .collect();
+    let git_failures: Vec<(&PathBuf, String)> = package_dirs
         .par_iter()
-        .filter_map(|component| {
-            let package_dir = dest.join(copy::component_dir_name(component));
-            git::init_and_commit(&package_dir)
+        .filter_map(|package_dir| {
+            git::init_and_commit(package_dir)
                 .err()
-                .map(|err| (component.clone(), err))
+                .map(|err| (package_dir, err))
         })
         .collect();
-    for (component, err) in &git_failures {
-        eprintln!("error: failed to commit {component}'s package: {err}");
+    for (package_dir, err) in &git_failures {
+        eprintln!("error: failed to commit {}: {err}", package_dir.display());
     }
     if !git_failures.is_empty() {
         return ExitCode::FAILURE;
@@ -124,7 +154,7 @@ pub fn run(root: &Path, dest: &Path, clean: bool, output_dir: Option<&Path>) -> 
 
     eprintln!(
         "Committed {} packages to their own 'main' branch",
-        copied.components_used.len()
+        package_dirs.len()
     );
 
     ExitCode::SUCCESS

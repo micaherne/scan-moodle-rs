@@ -25,6 +25,17 @@
 //!   - A string literal starting with '../', standalone or as the leading operand of a
 //!     concatenation, is also recorded, but with no such certainty.
 //!
+//! One more shape is recognised for require/include specifically, overfit to a real pattern in
+//! this codebase (e.g. `public/config.php`'s own forwarding shim: `$configfile = __DIR__ .
+//! '/../config.php'; require_once($configfile);`) rather than an attempt at general data-flow
+//! analysis: a bare variable used as the sole value of a require/include construct, traced back to
+//! the *nearest earlier assignment to that same variable name in the same file* whose own
+//! right-hand side is itself one of the recognised shapes above. One hop only — the assignment's
+//! own value is not itself traced any further back — and purely textual/sequential: whichever such
+//! assignment appears last before the require/include in source order is used, with no attempt at
+//! real control-flow analysis (consistent with this module's existing require/include detection,
+//! which already does not trace which functions get called before deciding an edge is real).
+//!
 //! Every result records a [`super::PathKind`] identifying which of these anchored it.
 //!
 //! Extraction: maps each node in the expression to a path segment, relative to the repository
@@ -45,6 +56,7 @@
 //! converts the dirroot portion to '@'.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 
 use mago_allocator::LocalArena;
 use mago_database::file::File;
@@ -62,6 +74,9 @@ use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::FunctionCall;
 use mago_syntax::cst::Identifier;
+use mago_syntax::cst::IfStatementBody;
+use mago_syntax::cst::IfStatementBodyElseClause;
+use mago_syntax::cst::IfStatementBodyElseIfClause;
 use mago_syntax::cst::IncludeConstruct;
 use mago_syntax::cst::IncludeOnceConstruct;
 use mago_syntax::cst::InterpolatedString;
@@ -71,6 +86,7 @@ use mago_syntax::cst::MethodCall;
 use mago_syntax::cst::PropertyAccess;
 use mago_syntax::cst::RequireConstruct;
 use mago_syntax::cst::RequireOnceConstruct;
+use mago_syntax::cst::Statement;
 use mago_syntax::cst::StaticMethodCall;
 use mago_syntax::cst::StringPart;
 use mago_syntax::cst::Variable;
@@ -100,6 +116,8 @@ pub fn find_paths(source: &str, current_file: &str, notation: &PathNotation) -> 
         notation,
         pending_parent: None,
         paths: Vec::new(),
+        recent_assignments: HashMap::new(),
+        conditional_scope_ends: Vec::new(),
     };
     let walker = PathFindingWalker;
     for statement in &program.statements {
@@ -117,6 +135,21 @@ struct Context<'a> {
     /// visited, so it never leaks into nested recursion.
     pending_parent: Option<String>,
     paths: Vec<PathResult>,
+    /// The most recent same-file assignment seen so far to each variable, keyed by variable name
+    /// (including its leading `$`) — updated on every assignment to a bare variable, whether or
+    /// not its right-hand side is itself a recognised path (a non-path assignment must still
+    /// overwrite/clear any earlier entry, or a later `require($var)` could get wrongly traced back
+    /// through a value `$var` no longer holds). Consulted only when a require/include construct's
+    /// value is itself a bare variable with no recognised shape of its own — see
+    /// [`PathFindingWalker::walk_require_like_construct`].
+    recent_assignments: HashMap<Vec<u8>, ResolvedPath>,
+    /// Line of the closing point of each `if`/`elseif`/`else` body currently being walked,
+    /// outermost first — the top of this stack (if any) is recorded on every path result built
+    /// while inside it (see [`PathResult::scope_end_line`]), so a require/include reachable only
+    /// on one conditional branch can be told apart from one that always runs. Pushed/popped by
+    /// [`PathFindingWalker::walk_conditional_branch`], the shared body of the walker's
+    /// `if`/`elseif`/`else` overrides.
+    conditional_scope_ends: Vec<u32>,
 }
 
 struct PathFindingWalker;
@@ -153,6 +186,21 @@ impl<'ast, 'arena, 'ctx> Walker<'ast, 'arena, Context<'ctx>> for PathFindingWalk
             self.walk_expression(assignment.lhs, context);
         }
         self.walk_expression(assignment.rhs, context);
+
+        // Track a bare-variable assignment for a later `require($var)`/`include($var)` to trace
+        // back to (see `PathKind::TracedVariable`) — recorded only when the right-hand side is
+        // itself one of the recognised path shapes, but *cleared* unconditionally otherwise, so a
+        // later require can never be traced back through a value the variable no longer holds.
+        if let Expression::Variable(Variable::Direct(variable)) = unwrap_parens(assignment.lhs) {
+            let rhs = unwrap_parens(assignment.rhs);
+            if is_potential_path(rhs) {
+                context
+                    .recent_assignments
+                    .insert(variable.name.to_vec(), resolve_potential_path(rhs, context));
+            } else {
+                context.recent_assignments.remove(variable.name);
+            }
+        }
     }
 
     fn walk_include_construct(
@@ -219,9 +267,66 @@ impl<'ast, 'arena, 'ctx> Walker<'ast, 'arena, Context<'ctx>> for PathFindingWalk
             self.walk_expression(argument.value(), context);
         }
     }
+
+    // The three overrides below replace `if`/`elseif`/`else`'s default walk entirely (a walker
+    // override always does, there is no "call the default first" in this API), so each one
+    // reproduces the rest of the default traversal (walking the condition, and — for the `if`
+    // body specifically — dispatching to the `elseif`/`else` clauses) alongside the one thing it
+    // actually adds: scoping the branch's own statement to its own conditional_scope_ends entry.
+
+    fn walk_if_statement_body(
+        &self,
+        body: &'ast IfStatementBody<'arena>,
+        context: &mut Context<'ctx>,
+    ) {
+        self.walk_conditional_branch(body.statement, context);
+        for else_if_clause in &body.else_if_clauses {
+            self.walk_if_statement_body_else_if_clause(else_if_clause, context);
+        }
+        if let Some(else_clause) = &body.else_clause {
+            self.walk_if_statement_body_else_clause(else_clause, context);
+        }
+    }
+
+    fn walk_if_statement_body_else_if_clause(
+        &self,
+        clause: &'ast IfStatementBodyElseIfClause<'arena>,
+        context: &mut Context<'ctx>,
+    ) {
+        walker::walk_expression(self, clause.condition, context);
+        self.walk_conditional_branch(clause.statement, context);
+    }
+
+    fn walk_if_statement_body_else_clause(
+        &self,
+        clause: &'ast IfStatementBodyElseClause<'arena>,
+        context: &mut Context<'ctx>,
+    ) {
+        self.walk_conditional_branch(clause.statement, context);
+    }
 }
 
 impl PathFindingWalker {
+    /// Shared body of the `if`/`elseif`/`else` overrides above: walks `statement` (a single
+    /// statement, which is a `Block` for the ordinary braced form, but could be one bare statement
+    /// for `if (x) foo();`) with its own closing line pushed onto `conditional_scope_ends` for the
+    /// duration, so every path result built anywhere inside it — however deeply nested in further
+    /// statements of its own — picks up this branch as its innermost enclosing conditional (see
+    /// [`super::PathResult::scope_end_line`]). Only `if`/`elseif`/`else` bodies are scoped this
+    /// way; `switch`, `try`, and loop bodies are deliberately left untouched; classes/interfaces/
+    /// functions/methods bodies always were and remain untouched too — see
+    /// [`Context::conditional_scope_ends`].
+    fn walk_conditional_branch<'ast, 'arena, 'ctx>(
+        &self,
+        statement: &'ast Statement<'arena>,
+        context: &mut Context<'ctx>,
+    ) {
+        let end_line = context.file.line_number(statement.span().end_offset()) + 1;
+        context.conditional_scope_ends.push(end_line);
+        self.walk_statement(statement, context);
+        context.conditional_scope_ends.pop();
+    }
+
     /// Shared body of the four `walk_*_construct` methods above: include/include_once/require/
     /// require_once all behave identically, tagging the construct's single value expression with
     /// their own name as `parent`.
@@ -235,6 +340,20 @@ impl PathFindingWalker {
             context.paths.push(result);
             return;
         }
+        if let Expression::Variable(Variable::Direct(variable)) = unwrap_parens(value)
+            && let Some(resolved) = context.recent_assignments.get(variable.name).cloned()
+        {
+            context.paths.push(build_path_result(
+                value,
+                Some(tag.to_string()),
+                context,
+                ResolvedPath {
+                    kind: PathKind::TracedVariable,
+                    ..resolved
+                },
+            ));
+            return;
+        }
         context.pending_parent = Some(tag.to_string());
         self.walk_expression(value, context);
     }
@@ -245,21 +364,25 @@ fn build_result(
     parent: Option<String>,
     context: &Context<'_>,
 ) -> PathResult {
+    build_path_result(expr, parent, context, resolve_potential_path(expr, context))
+}
+
+/// What [`is_potential_path`] confirming `true` for `expr` resolves to. Shared by [`build_result`]
+/// (called on the expression actually sitting in a require/include or recognised call argument)
+/// and [`PathFindingWalker::walk_assignment`] (called on an assignment's right-hand side, to
+/// remember what a later `require($var)`/`include($var)` tracing back to this assignment would
+/// resolve to — see [`PathKind::TracedVariable`]).
+fn resolve_potential_path(expr: &Expression<'_>, context: &Context<'_>) -> ResolvedPath {
     // `is_potential_path` guarantees `extract_path` returns `Some`.
     let (real_path, path) =
         extract_path(expr, context).expect("potential path must be extractable");
-    build_path_result(
-        expr,
-        parent,
-        context,
-        ResolvedPath {
-            kind: classify_kind(expr),
-            real_path,
-            path,
-            separator: extract_separator(expr),
-            mono_path_expr: extract_mono_path_expr(expr, context),
-        },
-    )
+    ResolvedPath {
+        kind: classify_kind(expr),
+        real_path,
+        path,
+        separator: extract_separator(expr),
+        mono_path_expr: extract_mono_path_expr(expr, context),
+    }
 }
 
 /// If `value` is a bare string literal — no concatenation, no other wrapping expression, modulo
@@ -297,6 +420,7 @@ fn build_require_literal_result(
 /// which [`build_path_result`] derives itself from its own `expr`/`context`/`parent` parameters.
 /// This is exactly the subset of [`PathResult`]'s fields the two callers above compute differently
 /// before [`build_path_result`] fills in the rest (`line`, `code`, `start_pos`, `end_pos`).
+#[derive(Clone)]
 struct ResolvedPath {
     kind: PathKind,
     real_path: String,
@@ -324,6 +448,7 @@ fn build_path_result(
         end_pos: Some(span.end_offset() as usize),
         separator: resolved.separator,
         mono_path_expr: resolved.mono_path_expr,
+        scope_end_line: context.conditional_scope_ends.last().copied(),
     }
 }
 
@@ -994,5 +1119,44 @@ mod tests {
             resolve_single(file, "dirname(dirname(__DIR__, 2)) . '/lib.php'"),
             resolve_single(file, "dirname(dirname(dirname(__DIR__))) . '/lib.php'")
         );
+    }
+
+    /// The real pattern this is overfit to: `public/config.php`'s own forwarding shim builds its
+    /// target into a variable first, then requires the variable.
+    #[test]
+    fn require_of_a_variable_traces_back_to_its_assignment() {
+        let notation = PathNotation::new("public/");
+        let source = "<?php $configfile = __DIR__ . '/../config.php'; require_once($configfile);";
+        let paths = find_paths(source, "public/config.php", &notation);
+        let traced = paths
+            .iter()
+            .find(|p| p.kind == PathKind::TracedVariable)
+            .expect("expected a traced-variable result");
+        assert_eq!(traced.real_path, "config.php");
+        assert_eq!(traced.parent.as_deref(), Some("require_once"));
+    }
+
+    /// Only the *nearest* assignment counts — a later, unrecognised reassignment (here, a plain
+    /// function call with no path shape of its own) must invalidate the earlier one rather than
+    /// leaving it to be traced through.
+    #[test]
+    fn require_of_a_variable_reassigned_to_something_unrecognised_is_not_traced() {
+        let notation = PathNotation::new("public/");
+        let source = "<?php $file = __DIR__ . '/x.php'; $file = some_call(); require($file);";
+        let paths = find_paths(source, "public/lib/setup.php", &notation);
+        assert!(
+            !paths.iter().any(|p| p.kind == PathKind::TracedVariable),
+            "expected no traced-variable result once the variable was reassigned to something unrecognised"
+        );
+    }
+
+    /// A require of a variable with no preceding same-file assignment at all produces nothing —
+    /// same as today, not a new false positive.
+    #[test]
+    fn require_of_an_unassigned_variable_produces_no_result() {
+        let notation = PathNotation::new("public/");
+        let source = "<?php require($file);";
+        let paths = find_paths(source, "public/lib/setup.php", &notation);
+        assert!(paths.is_empty());
     }
 }

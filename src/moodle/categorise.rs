@@ -5,6 +5,10 @@
 //! `core\component` to locate their own files, and which categorically cannot: a reference
 //! categorised `PreComponent`, for instance, is real file-loading work done before
 //! `core\component` could exist to be loaded, no matter what the reference itself resolves to.
+//! `PreComponentLiteral` is the one exception carved out of that: a bare-literal require in the
+//! same position can't be left as-is the way every other pre-component reference can, but it also
+//! can't be rewritten through `core\component` any more than its neighbours can — see its own doc
+//! comment.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -14,15 +18,17 @@ use crate::path_finder::{PathKind, PathResult};
 
 /// One path reference's category, most-specific rule first: a reference can only be `Component` if
 /// it appears in `core\component`'s own source file or unit test, and can only be `Config` if it
-/// targets config.php outright; `PreComponent` only if it sits on or before the containing file's
-/// own boundary line — each of those checks settles the category regardless of what the reference
-/// itself resolves to. `IncludePathRelative` is checked next: a plain-literal require/include whose
-/// text names a location Moodle actually resolves through the PHP include path, not relative to
-/// anything this project's rewrites could express. `PluginTypeRoot` is checked after that, ahead of
-/// everything resolution-based, since it too is a plain string match against a fixed, known set of
-/// locations. Past those, `DynamicComponent`, `DirrootWrangling` and `RootWrangling` are specific
-/// shapes checked ahead of the plain same/different-component fallback that everything else
-/// resolved lands in.
+/// targets config.php outright; `PreComponent`/`PreComponentLiteral` only if it sits on or before
+/// the containing file's own boundary line — each of those checks settles the category regardless
+/// of what the reference itself resolves to. Within that boundary, `IncludePathRelative` is checked
+/// ahead of the `PreComponent`/`PreComponentLiteral` split, for the same reason it's checked next
+/// outside the boundary too: a plain-literal require/include whose text names a location Moodle
+/// actually resolves through the PHP include path, not relative to anything this project's rewrites
+/// could express, regardless of whether it also happens to sit in pre-component code.
+/// `PluginTypeRoot` is checked after that, ahead of everything resolution-based, since it too is a
+/// plain string match against a fixed, known set of locations. Past those, `DynamicComponent`,
+/// `DirrootWrangling` and `RootWrangling` are specific shapes checked ahead of the plain
+/// same/different-component fallback that everything else resolved lands in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathCategory {
     /// Appears in `core\component`'s own source file (`public/lib/classes/component.php`) or its
@@ -35,14 +41,36 @@ pub enum PathCategory {
     /// Targets config.php itself (root or `public/`) — see
     /// [`crate::moodle::entrypoints::config_locations`].
     Config,
-    /// Sits in a bootstrap file (see [`crate::moodle::entrypoints::classify`] with
-    /// `bootstrap_only: true`), on or before that file's own boundary line — real file-loading
-    /// work done with no possible access to `core\component` yet, regardless of what it leads to.
-    /// The boundary line itself is included: it is the require/include statement that hands off
-    /// into the rest of the bootstrap chain (e.g. the line in setup.php that requires
-    /// component.php), and that statement's own target is resolved and loaded before anything it
-    /// leads to — including component.php's own definitions — has run.
+    /// Sits within the containing file's own
+    /// [`crate::moodle::entrypoints::PreComponentExtent`] (see
+    /// [`crate::moodle::entrypoints::pre_component_extents`]) — real file-loading work done with no
+    /// possible access to `core\component` yet, regardless of what it leads to. This applies to any
+    /// file with an extent, entry point or not: an `UpToLine` boundary line is included in the
+    /// extent (it is the require/include statement that hands off into the rest of the bootstrap
+    /// chain — e.g. the line in setup.php that requires component.php, or an ordinary page's own
+    /// config.php line — and that statement's own target is resolved and loaded before anything it
+    /// leads to has run), and a `WholeFile` extent covers every line unconditionally. Excludes a
+    /// bare-literal require/include in the same position — see [`Self::PreComponentLiteral`] — and,
+    /// ahead of that, anything [`Self::IncludePathRelative`] already claims.
     PreComponent,
+    /// The same position as [`Self::PreComponent`] — within the containing file's own
+    /// [`crate::moodle::entrypoints::PreComponentExtent`] — but a bare string literal used as the
+    /// sole value of a require/include construct, with no concatenation (e.g.
+    /// `require_once('setuplib.php')`, as opposed to `require_once($CFG->libdir .
+    /// '/setuplib.php')` or an already-`__DIR__`-relative one, both of which stay
+    /// [`Self::PreComponent`]). A bare literal like this is resolved, at runtime, by a fallback PHP
+    /// only reaches *after* first searching the include path: the directory of the file containing
+    /// the require. That fallback happens to land correctly today because the referencing file and
+    /// its target both still sit exactly where they always have — but once files with
+    /// pre-component code are split into per-component packages, only such a file itself gets
+    /// placed back at its original location (entry point or not — see the Composer plugin that
+    /// places both back identically); an ordinary sibling file it reaches this way is not, so the
+    /// same fallback resolution would silently miss it. Unlike every other pre-component reference,
+    /// this one is therefore rewritten — see `REWRITE_SPEC.md` — but only ever to a
+    /// `__DIR__`-relative expression, the same as [`Self::Config`] and for the identical reason:
+    /// `component_path()`/`get_path()` are equally unavailable this early, whether or not the
+    /// literal's own target happens to be another file placed back at a fixed location.
+    PreComponentLiteral,
     /// A bare-literal require/include whose text starts with `HTML/` or `PEAR/` — Moodle's
     /// PEAR-derived form-rendering library, which `public/lib/setup.php` loads by adding
     /// `lib/pear` to PHP's own include path (`ini_set('include_path', ...)`), not by requiring it
@@ -93,6 +121,7 @@ impl fmt::Display for PathCategory {
             Self::Component => "component",
             Self::Config => "config",
             Self::PreComponent => "pre-component",
+            Self::PreComponentLiteral => "pre-component-literal",
             Self::IncludePathRelative => "include-path-relative",
             Self::PluginTypeRoot => "plugin-type-root",
             Self::DynamicComponent => "dynamic-component",
@@ -133,10 +162,11 @@ pub struct FileContext {
     /// [`crate::moodle::entrypoints::component_locations`] — `core\component`'s own source file or
     /// its unit test.
     pub is_component_file: bool,
-    /// This file's own line, taken from [`crate::moodle::entrypoints::classify`] called with
-    /// `bootstrap_only: true` — `None` if the file isn't in that list at all (true of most files:
-    /// ordinary application code with no real, traceable require chain into component.php).
-    pub file_boundary_line: Option<u32>,
+    /// This file's own [`crate::moodle::entrypoints::PreComponentExtent`], from
+    /// [`crate::moodle::entrypoints::pre_component_extents`] — `None` if the file isn't in that map
+    /// at all (true of most files: ordinary application code with no real, traceable require chain
+    /// into component.php or config.php).
+    pub pre_component_extent: Option<crate::moodle::entrypoints::PreComponentExtent>,
     /// The component owning this file, via [`crate::moodle::resolver::ComponentResolver`].
     pub source_component: Option<String>,
 }
@@ -157,10 +187,18 @@ pub fn categorise(
         return PathCategory::Config;
     }
     if file
-        .file_boundary_line
-        .is_some_and(|boundary_line| result.line <= boundary_line)
+        .pre_component_extent
+        .as_ref()
+        .is_some_and(|extent| extent.covers(result.line))
     {
-        return PathCategory::PreComponent;
+        if is_include_path_relative(result) {
+            return PathCategory::IncludePathRelative;
+        }
+        return if result.kind == PathKind::RequireLiteral {
+            PathCategory::PreComponentLiteral
+        } else {
+            PathCategory::PreComponent
+        };
     }
     if is_include_path_relative(result) {
         return PathCategory::IncludePathRelative;
@@ -282,6 +320,7 @@ mod tests {
             end_pos: None,
             separator: String::new(),
             mono_path_expr: String::new(),
+            scope_end_line: None,
         }
     }
 
@@ -311,7 +350,11 @@ mod tests {
     ) -> FileContext {
         FileContext {
             is_component_file,
-            file_boundary_line,
+            pre_component_extent: file_boundary_line.map(|line| {
+                crate::moodle::entrypoints::PreComponentExtent::UpToLine(vec![
+                    crate::moodle::entrypoints::BoundaryEdge::unbounded(line),
+                ])
+            }),
             source_component: source_component.map(str::to_string),
         }
     }
@@ -369,6 +412,46 @@ mod tests {
             &file_context(false, Some(122), Some("tool_behat")),
         );
         assert_eq!(category, PathCategory::PreComponent);
+    }
+
+    /// A bare-literal require sitting in the pre-component zone can't stay a bare literal — the
+    /// same-directory fallback it relies on today only works because nothing has moved yet — so it
+    /// gets its own category, distinct from the `$CFG->dirroot`-rooted reference above, even though
+    /// both sit on the same boundary line.
+    #[test]
+    fn a_bare_literal_before_the_boundary_line_is_pre_component_literal() {
+        let target = resolution("core", "/setuplib.php");
+        let category = categorise(
+            &PathResult {
+                kind: PathKind::RequireLiteral,
+                code: "'setuplib.php'".to_string(),
+                ..result("public/lib/setup.php", 30)
+            },
+            Some(&target),
+            &scan_context(&HashSet::new(), &HashSet::new(), DIRROOT),
+            &file_context(false, Some(122), Some("tool_behat")),
+        );
+        assert_eq!(category, PathCategory::PreComponentLiteral);
+    }
+
+    /// Even inside the pre-component zone, an `HTML/`/`PEAR/` bare literal is still resolved via
+    /// PHP's include path, not the referencing file's own directory — the same reason it's
+    /// `IncludePathRelative` outside the zone — so that check wins here too, ahead of the
+    /// pre-component split.
+    #[test]
+    fn a_pear_bare_literal_before_the_boundary_line_is_still_include_path_relative() {
+        let target = resolution("core", "/lib/pear/PEAR/Exception.php");
+        let category = categorise(
+            &PathResult {
+                kind: PathKind::RequireLiteral,
+                code: "'PEAR/Exception.php'".to_string(),
+                ..result("public/lib/setup.php", 30)
+            },
+            Some(&target),
+            &scan_context(&HashSet::new(), &HashSet::new(), DIRROOT),
+            &file_context(false, Some(122), Some("tool_behat")),
+        );
+        assert_eq!(category, PathCategory::IncludePathRelative);
     }
 
     #[test]

@@ -22,9 +22,9 @@ use crate::moodle::scan::{Scan, categorise_all};
 pub struct RewriteOutcome {
     pub discovered: ComponentDiscovery,
     pub rewritten: usize,
-    /// Every bootstrap file, CLI script and page in `root`, classified *before* step 3's rewrite
-    /// ran — see [`execute`] for why that ordering, rather than the rewritten codebase, is what a
-    /// caller wanting accurate classifications should use.
+    /// Every bootstrap-relevant file in `root` (`Cli`, `Other` and `BootstrapDependency` alike),
+    /// classified *before* step 3's rewrite ran — see [`execute`] for why that ordering, rather
+    /// than the rewritten codebase, is what a caller wanting accurate classifications should use.
     pub entry_points: Vec<FileClassification>,
 }
 
@@ -73,9 +73,9 @@ pub fn execute(root: &Path, output_dir: Option<&Path>) -> Option<RewriteOutcome>
     };
     let dirroot = moodle::dirroot_prefix(root).trim_end_matches('/');
     let before_references = categorise_all(&before_scan, dirroot);
-    // The unrestricted entrypoint scan: every bootstrap file, CLI script and page, not just
-    // bootstrap files — see REWRITE_SPEC.md, step 2.
-    let entry_points = entrypoints::classify(&before_scan.files, &before_scan.notation, false);
+    // Every bootstrap-relevant file, `Cli`/`Other`/`BootstrapDependency` alike — see
+    // REWRITE_SPEC.md, step 2.
+    let entry_points = entrypoints::classify(&before_scan.files, &before_scan.notation);
     let entry_point_files: HashSet<String> = entry_points
         .iter()
         .map(|classification| classification.file.clone())

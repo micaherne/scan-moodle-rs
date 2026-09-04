@@ -12,15 +12,17 @@ use crate::moodle::scan::CategorisedReference;
 use crate::path_finder::PathKind;
 
 /// Whether `category` is one step 3 ever rewrites at all — [`PathCategory::Config`],
-/// [`PathCategory::StaticSameComponent`], [`PathCategory::StaticDifferentComponent`], or
-/// [`PathCategory::VariableOnly`]. Every other category is left untouched unconditionally (see
-/// `REWRITE_SPEC.md`); [`decide`] is only meaningful when this is true. Note that for `Config` and
-/// `VariableOnly` specifically, eligibility here is not a guarantee [`decide`] will actually
-/// produce a replacement — see their own doc comments.
+/// [`PathCategory::PreComponentLiteral`], [`PathCategory::StaticSameComponent`],
+/// [`PathCategory::StaticDifferentComponent`], or [`PathCategory::VariableOnly`]. Every other
+/// category is left untouched unconditionally (see `REWRITE_SPEC.md`); [`decide`] is only
+/// meaningful when this is true. Note that for `Config` and `VariableOnly` specifically,
+/// eligibility here is not a guarantee [`decide`] will actually produce a replacement — see their
+/// own doc comments.
 pub fn is_eligible(category: PathCategory) -> bool {
     matches!(
         category,
         PathCategory::Config
+            | PathCategory::PreComponentLiteral
             | PathCategory::StaticSameComponent
             | PathCategory::StaticDifferentComponent
             | PathCategory::VariableOnly
@@ -37,36 +39,58 @@ pub fn is_eligible(category: PathCategory) -> bool {
 /// `public/lib/classes/component.php`/`public/lib/tests/component_test.php`, which are excluded
 /// from this category entirely (see [`PathCategory::Component`]), but nothing stops it happening
 /// elsewhere (e.g. a reference rooted at `$CFG->libdir` instead), so it isn't treated as
-/// unreachable.
+/// unreachable. `None` unconditionally, regardless of category, when
+/// [`crate::path_finder::PathResult::kind`] is [`PathKind::TracedVariable`]: the source text at
+/// that location is a bare variable, not a path, so however the category rules below would
+/// otherwise have addressed the resolved target, there is nothing there that could safely be
+/// replaced with it — doing so would require rewriting the variable's own value, which may be used
+/// elsewhere in the file for purposes this project has no visibility into.
 ///
 /// Only meaningful for a reference already categorised as [`PathCategory::Config`],
-/// [`PathCategory::StaticSameComponent`], [`PathCategory::StaticDifferentComponent`] or
-/// [`PathCategory::VariableOnly`] (see [`is_eligible`]) — every other category is left untouched by
-/// step 3 unconditionally, before this function is ever consulted (see `REWRITE_SPEC.md`).
+/// [`PathCategory::PreComponentLiteral`], [`PathCategory::StaticSameComponent`],
+/// [`PathCategory::StaticDifferentComponent`] or [`PathCategory::VariableOnly`] (see
+/// [`is_eligible`]) — every other category is left untouched by step 3 unconditionally, before this
+/// function is ever consulted (see `REWRITE_SPEC.md`).
 ///
-/// `entry_point_files` is every file the entrypoint scan classified as a bootstrap file, a CLI
-/// script or a page (all three count as "an entry point" here) — the *unrestricted* scan, not
-/// `find-entrypoints`' `--bootstrap-only` one (see `crate::moodle::entrypoints::classify`, called
-/// with `bootstrap_only: false`). Unused for `Config`/`VariableOnly`: neither replacement depends
-/// on whether the source file is an entry point — see their own doc comments for why. Checked on
-/// both sides of a `StaticSameComponent`/`StaticDifferentComponent` reference: whether the
-/// *source* file is an entry point affects how a non-entry-point target gets addressed (see the
-/// inline comment above the `match` below); whether the *target* file is an entry point overrides
-/// that entirely, regardless of the source — see the inline comment right before that `match`.
+/// `entry_point_files` is every file the entrypoint scan classified at all — `Cli`, `Other` and
+/// `BootstrapDependency` alike (all three count as "an entry point" here) — the whole,
+/// unfiltered output of [`crate::moodle::entrypoints::classify`]. Unused for `Config`,
+/// `VariableOnly` and `PreComponentLiteral`: none of those three replacements depend on whether the
+/// source file is an entry point — see their own doc comments for why; `PreComponentLiteral`
+/// specifically ignores the *target* side too, unlike every other category below, since
+/// `get_path()` is exactly as unavailable there as `component_path()` is, regardless of what the
+/// reference targets. Checked on both sides of a
+/// `StaticSameComponent`/`StaticDifferentComponent` reference: whether the *source* file is an
+/// entry point affects how a non-entry-point target gets addressed (see the inline comment above
+/// the `match` below); whether the *target* file is an entry point overrides that entirely,
+/// regardless of the source — see the inline comment right before that `match`.
 pub fn decide(
     reference: &CategorisedReference,
     entry_point_files: &HashSet<String>,
 ) -> Option<String> {
     debug_assert!(
         is_eligible(reference.category),
-        "decide is only meaningful for a reference the path scan categorised as config, static-same/different-component or variable-only"
+        "decide is only meaningful for a reference the path scan categorised as config, pre-component-literal, static-same/different-component or variable-only"
     );
+
+    if reference.result.kind == PathKind::TracedVariable {
+        return None;
+    }
 
     if reference.category == PathCategory::VariableOnly {
         return variable_only_expression(reference);
     }
     if reference.category == PathCategory::Config {
         return config_expression(reference);
+    }
+    if reference.category == PathCategory::PreComponentLiteral {
+        // Never `component_path()`/`get_path()`, regardless of what this targets — see the type's
+        // own doc comment. Always produces a replacement: this category is only ever reached for a
+        // bare literal, which by construction is never already `__DIR__`-relative.
+        return Some(dir_relative_expression(
+            &reference.file,
+            &reference.result.real_path,
+        ));
     }
 
     let target = reference
@@ -92,12 +116,13 @@ pub fn decide(
     // is *also* loaded somewhere else in the same request (as it usually will be, since it's an
     // entry point), PHP fatals on redeclaring the same classes/functions twice. So a reference to an
     // entry-point target is always rewritten the same way a reference to a `root`-owned target is,
-    // straight to `$CFG->root` — the plugin-placed copy at the project root is the only one that's
-    // ever safe to point at. This overrides everything below, including same-component handling:
-    // two files being nominally in the same component does not mean they end up in the same place
-    // once one of them is an entry point.
+    // through a `\core\component::get_path()` call resolving against the repository root — the
+    // plugin-placed copy at the project root is the only one that's ever safe to point at. This
+    // overrides everything below, including same-component handling: two files being nominally in
+    // the same component does not mean they end up in the same place once one of them is an entry
+    // point.
     if target.component != ROOT_COMPONENT && entry_point_files.contains(target_file) {
-        return Some(root_expression(target_file));
+        return Some(get_path_expression(target_file));
     }
 
     // An entry point never gets a `__DIR__`-relative path, full stop — not just into its own
@@ -105,14 +130,14 @@ pub fn decide(
     // location is settled: today it's a script sitting directly in the deployed layout, but that's
     // exactly the arrangement this project might replace later (e.g. a routing shim in its place,
     // with the real file packaged alongside the rest of its component). A `component_path()`/
-    // `$CFG->root` call keeps working under whatever that ends up being; a hard-coded `__DIR__`
+    // `get_path()` call keeps working under whatever that ends up being; a hard-coded `__DIR__`
     // climb only keeps working for as long as the entry point stays exactly where it is today, and
     // would all have to be re-rewritten the moment it doesn't.
     match reference.category {
         PathCategory::StaticSameComponent
             if target.component == ROOT_COMPONENT && source_is_entry_point =>
         {
-            Some(root_expression(target_file))
+            Some(get_path_expression(target_file))
         }
         PathCategory::StaticSameComponent if target.component == ROOT_COMPONENT => {
             Some(dir_relative_expression(&reference.file, target_file))
@@ -124,7 +149,7 @@ pub fn decide(
             Some(dir_relative_expression(&reference.file, target_file))
         }
         PathCategory::StaticDifferentComponent if target.component == ROOT_COMPONENT => {
-            Some(root_expression(target_file))
+            Some(get_path_expression(target_file))
         }
         PathCategory::StaticDifferentComponent => Some(component_path_expression(target)),
         _ => unreachable!("guarded by the debug_assert above"),
@@ -153,7 +178,7 @@ fn variable_only_expression(reference: &CategorisedReference) -> Option<String> 
 /// The `__DIR__`-relative replacement for a reference to config.php itself — see
 /// `REWRITE_SPEC.md`'s "config.php rewriting" section. Unlike every other rewrite in this module,
 /// this applies identically whether or not `reference`'s file is an entry point: `component_path()`
-/// and `$CFG->root` are never an option for config.php regardless (see `REWRITE_SPEC.md`), so
+/// and `get_path()` are never an option for config.php regardless (see `REWRITE_SPEC.md`), so
 /// there's no more-robust alternative being given up by using `__DIR__` here the way there would be
 /// for, say, a same-component reference in an entry point — and the bare relative literal a
 /// reference to config.php almost always starts as (e.g. `'../config.php'`) is already exactly as
@@ -185,24 +210,31 @@ fn config_expression(reference: &CategorisedReference) -> Option<String> {
 /// - [`PathCategory::Config`]: `true` when the current source text isn't already what [`decide`]
 ///   says it should be — the same "does the current text already match" check as the static
 ///   categories below, since `Config` is now actually rewritten (to `__DIR__`-relative) rather than
-///   just reported on; see [`decide`]'s own doc comment for why `component_path()`/`$CFG->root`
+///   just reported on; see [`decide`]'s own doc comment for why `component_path()`/`get_path()`
 ///   still never apply here.
 /// - [`PathCategory::PreComponent`]: also always `false`, but for a reason distinct from
 ///   `Component`/`IncludePathRelative` above, and one that matters more: this is real file-loading
 ///   work done before `core\component` exists, so — like `Config` — it can never be rewritten to a
-///   `component_path()`/`$CFG->root` call by this tool. Unlike `Config`, though, it also isn't
-///   rewritten to a `__DIR__`-relative expression, even though one could in principle be written by
-///   hand. That's a deliberate scope decision, not an oversight: the bootstrap sequence
-///   `PreComponent` lives in cannot be split out under this project's whole approach, on principle —
-///   the mechanism this project relies on for splitting is `core\component` itself acting as the
-///   oracle for where every component lives, and pre-component code by definition runs before that
-///   oracle exists, so nothing here is ever a *candidate* for splitting in the first place. Whatever
-///   form the reference is written in today — a bare literal, `$CFG->dirroot`, `$CFG->root`, or
-///   already `__DIR__`-relative — is therefore equally permanent, and Moodle works correctly in a
-///   split-up layout regardless of which one it is. That is a categorically different situation from
-///   every other not-yet-implemented category below, where the reference genuinely does need
-///   resolving somehow before a split layout would work — conflating the two by both reading `true`
-///   is exactly what this variant exists to avoid.
+///   `component_path()`/`get_path()` call by this tool. Unlike `Config`, though, it also isn't
+///   rewritten to a `__DIR__`-relative expression. That's a deliberate scope decision, not an
+///   oversight, for every *remaining* shape a pre-component reference can take once bare literals are
+///   carved out into [`PathCategory::PreComponentLiteral`] below — `$CFG->dirroot`/`$CFG->root`
+///   already resolve the same way regardless of where either file ends up physically sitting, and an
+///   already-`__DIR__`-relative one already resolves the same way *as long as* both files keep
+///   sitting at the same relative position to each other, which is true here specifically because
+///   pre-component code by definition can never be split out — the mechanism this project relies on
+///   for splitting is `core\component` itself acting as the oracle for where every component lives,
+///   and pre-component code runs before that oracle exists. That is a categorically different
+///   situation from every other not-yet-implemented category below, where the reference genuinely
+///   does need resolving somehow before a split layout would work — conflating the two by both
+///   reading `true` is exactly what this variant exists to avoid.
+/// - [`PathCategory::PreComponentLiteral`]: `true` when the current source text isn't already what
+///   [`decide`] says it should be — the same "does the current text already match" check as `Config`
+///   and the static categories below. This is the one shape of pre-component reference that
+///   *doesn't* get `PreComponent`'s permanent pass: a bare literal's same-directory fallback only
+///   resolves correctly today because nothing has moved yet, so — unlike `$CFG->dirroot`/`$CFG->root`
+///   or an already-`__DIR__`-relative reference — leaving it as-is would not, in fact, keep working
+///   once bootstrap files are split into packages. See the type's own doc comment.
 /// - [`PathCategory::StaticSameComponent`]/[`PathCategory::StaticDifferentComponent`]: `true` when
 ///   the current source text isn't already what [`decide`] says it should be — normally because
 ///   the reference didn't exist yet when step 3 ran (e.g. introduced by an applied patch), rather
@@ -236,6 +268,7 @@ pub fn still_needs_rewrite(
         | PathCategory::IncludePathRelative
         | PathCategory::PreComponent => false,
         PathCategory::Config
+        | PathCategory::PreComponentLiteral
         | PathCategory::StaticSameComponent
         | PathCategory::StaticDifferentComponent => decide(reference, entry_point_files)
             .is_some_and(|replacement| replacement != reference.result.code),
@@ -259,22 +292,25 @@ fn component_path_expression(target: &Resolution) -> String {
     };
     format!(
         "\\core\\component::component_path({}, {})",
-        quote_php_string(&target.component),
-        quote_php_string(&path_argument)
+        path_text_expression(&target.component),
+        path_text_expression(&path_argument)
     )
 }
 
-/// `$CFG->root . '<path>'` for `target_file`, a plain repository-root-relative path (no leading
-/// slash, the same shape [`crate::path_finder::PathResult::real_path`] always has) — used verbatim,
-/// with a leading slash spliced on, since `$CFG->root` already points at the repository root. Used
-/// for two different reasons a target can be pinned to this one fixed, permanent location rather
-/// than wherever its owning component's package ends up: it belongs to no component at all (the
-/// `root` pseudo-component), or it's an entry point (see `decide`'s own doc comment) — see
-/// `REWRITE_SPEC.md`.
-fn root_expression(target_file: &str) -> String {
+/// `\core\component::get_path('<path>')` for `target_file`, a plain repository-root-relative path
+/// (no leading slash, the same shape [`crate::path_finder::PathResult::real_path`] always has) —
+/// used verbatim, with a leading slash spliced on; `get_path()` resolves its argument against the
+/// repository root (`$CFG->root`, or `dirname($CFG->dirroot)` as a fallback) and is tolerant of the
+/// leading slash. Routing through `core\component` rather than emitting a bare `$CFG->root . ...`
+/// concatenation keeps every call site free of its own `global $CFG` and puts the root-resolution
+/// logic in one place. Used for two different reasons a target can be pinned to this one fixed,
+/// permanent location rather than wherever its owning component's package ends up: it belongs to no
+/// component at all (the `root` pseudo-component), or it's an entry point (see `decide`'s own doc
+/// comment) — see `REWRITE_SPEC.md`.
+fn get_path_expression(target_file: &str) -> String {
     format!(
-        "$CFG->root . {}",
-        quote_php_string(&format!("/{target_file}"))
+        "\\core\\component::get_path({})",
+        path_text_expression(&format!("/{target_file}"))
     )
 }
 
@@ -289,7 +325,7 @@ fn dir_relative_expression(source_file: &str, target_path: &str) -> String {
         levels => format!("dirname(__DIR__, {levels})"),
     };
     match suffix {
-        Some(literal) => format!("{base} . {}", quote_php_string(&literal)),
+        Some(literal) => format!("{base} . {}", path_text_expression(&literal)),
         None => base,
     }
 }
@@ -353,6 +389,87 @@ fn quote_php_string(value: &str) -> String {
     quoted
 }
 
+/// A PHP expression that reproduces `value`'s runtime string, where `value` is text the path
+/// finder built using its `{...}` marker convention for a piece of the original source that was a
+/// variable or other expression rather than literal characters (see `node_to_segment` in
+/// `path_finder::finder`) — e.g. `public/lang/en/{$file}.php`, standing in for the original source
+/// `"$CFG->dirroot/lang/en/$file.php"`. Each marker is its own expression's exact source text, so
+/// it is spliced back in verbatim, unquoted and unescaped; everything between markers is ordinary
+/// literal text and goes through [`quote_php_string`] like any other literal. The pieces are joined
+/// with PHP's `.` operator, matching the concatenation style every other expression this module
+/// builds already uses — nothing generated here relies on double-quoted string interpolation.
+///
+/// A `value` with no marker at all — overwhelmingly the common case — degenerates to exactly the
+/// single quoted literal [`quote_php_string`] alone would have produced, including for an empty
+/// `value` (`''`, not an empty, syntax-breaking gap between the surrounding `.` operators).
+fn path_text_expression(value: &str) -> String {
+    let segments = marker_segments(value);
+    if segments.is_empty() {
+        // Only reachable for an empty `value`: a marker always leaves at least an `Expression`
+        // segment, and any non-empty literal text always leaves at least a `Literal` one.
+        return quote_php_string(value);
+    }
+    segments
+        .into_iter()
+        .map(|segment| match segment {
+            PathSegment::Literal(text) => quote_php_string(text),
+            PathSegment::Expression(expr) => expr,
+        })
+        .collect::<Vec<_>>()
+        .join(" . ")
+}
+
+/// A piece of `value` as split by [`marker_segments`]: either a stretch of ordinary literal text,
+/// or a `{...}` marker's inner source text with its enclosing braces removed.
+enum PathSegment<'a> {
+    Literal(&'a str),
+    Expression(String),
+}
+
+/// Splits `value` into its alternating literal and `{...}`-marker pieces, in order — never an empty
+/// [`PathSegment::Literal`] (an empty `value`, or two markers with nothing between them, simply
+/// contribute no literal segment there rather than an empty one). Braces are matched by nesting
+/// depth rather than by the first `}` found, so a marker whose own expression contains braces isn't
+/// cut short. An unterminated `{` — not expected from anything the path finder produces, since
+/// every marker it emits wraps a real, fully-parsed expression's own span — is treated as running to
+/// the end of `value` rather than panicking, so this function stays total.
+fn marker_segments(value: &str) -> Vec<PathSegment<'_>> {
+    let bytes = value.as_bytes();
+    let mut segments = Vec::new();
+    let mut literal_start = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'{' {
+            i += 1;
+            continue;
+        }
+        if i > literal_start {
+            segments.push(PathSegment::Literal(&value[literal_start..i]));
+        }
+        let expr_start = i + 1;
+        let mut depth = 1;
+        let mut j = expr_start;
+        while j < bytes.len() && depth > 0 {
+            match bytes[j] {
+                b'{' => depth += 1,
+                b'}' => depth -= 1,
+                _ => {}
+            }
+            j += 1;
+        }
+        let expr_end = if depth == 0 { j - 1 } else { j };
+        segments.push(PathSegment::Expression(
+            value[expr_start..expr_end].to_string(),
+        ));
+        i = j;
+        literal_start = i;
+    }
+    if literal_start < value.len() {
+        segments.push(PathSegment::Literal(&value[literal_start..]));
+    }
+    segments
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,6 +496,7 @@ mod tests {
                 end_pos: Some(0),
                 separator: String::new(),
                 mono_path_expr: String::new(),
+                scope_end_line: None,
             },
             source_component: None,
             target: target.map(|(component, path_in_component)| Resolution {
@@ -519,7 +637,7 @@ mod tests {
     }
 
     #[test]
-    fn different_component_root_target_rewrites_to_cfg_root() {
+    fn different_component_root_target_rewrites_to_get_path() {
         let reference = reference(
             "public/admin/tool/xmldb/index.php",
             "public/backup/backup.class.php",
@@ -529,12 +647,12 @@ mod tests {
         );
         assert_eq!(
             decide(&reference, &entry_points(&[])),
-            Some("$CFG->root . '/public/backup/backup.class.php'".to_string())
+            Some("\\core\\component::get_path('/public/backup/backup.class.php')".to_string())
         );
     }
 
     #[test]
-    fn entry_point_source_via_dirroot_to_root_owned_target_rewrites_to_cfg_root() {
+    fn entry_point_source_via_dirroot_to_root_owned_target_rewrites_to_get_path() {
         let reference = reference(
             "public/admin/tool/xmldb/index.php",
             "public/backup/backup.class.php",
@@ -545,12 +663,12 @@ mod tests {
         let entry_points = entry_points(&["public/admin/tool/xmldb/index.php"]);
         assert_eq!(
             decide(&reference, &entry_points),
-            Some("$CFG->root . '/public/backup/backup.class.php'".to_string())
+            Some("\\core\\component::get_path('/public/backup/backup.class.php')".to_string())
         );
     }
 
     #[test]
-    fn entry_point_source_already_dir_relative_to_root_owned_target_is_still_forced_to_cfg_root() {
+    fn entry_point_source_already_dir_relative_to_root_owned_target_is_still_forced_to_get_path() {
         let reference = reference(
             "public/admin/tool/xmldb/index.php",
             "public/backup/backup.class.php",
@@ -561,12 +679,12 @@ mod tests {
         let entry_points = entry_points(&["public/admin/tool/xmldb/index.php"]);
         assert_eq!(
             decide(&reference, &entry_points),
-            Some("$CFG->root . '/public/backup/backup.class.php'".to_string())
+            Some("\\core\\component::get_path('/public/backup/backup.class.php')".to_string())
         );
     }
 
     #[test]
-    fn entry_point_source_to_another_entry_point_via_dirroot_rewrites_to_cfg_root() {
+    fn entry_point_source_to_another_entry_point_via_dirroot_rewrites_to_get_path() {
         let reference = reference(
             "public/admin/tool/xmldb/index.php",
             "public/course/view.php",
@@ -580,16 +698,17 @@ mod tests {
         ]);
         assert_eq!(
             decide(&reference, &entry_points),
-            Some("$CFG->root . '/public/course/view.php'".to_string())
+            Some("\\core\\component::get_path('/public/course/view.php')".to_string())
         );
     }
 
     /// This is the "same component" category, not "different component" — `backup.php` is itself
     /// root-owned, same as its target — but an entry point never gets `__DIR__`-relative addressing
-    /// regardless of category: it still rewrites to `$CFG->root`, exactly as it would if the entry
-    /// point instead belonged to a real component (see the "different component, root" case above).
+    /// regardless of category: it still rewrites to a `get_path()` call, exactly as it would if the
+    /// entry point instead belonged to a real component (see the "different component, root" case
+    /// above).
     #[test]
-    fn entry_point_source_to_root_owned_target_rewrites_to_cfg_root() {
+    fn entry_point_source_to_root_owned_target_rewrites_to_get_path() {
         let reference = reference(
             "public/backup/backup.php",
             "public/backup/moodle2/backup_plan_builder.class.php",
@@ -603,7 +722,7 @@ mod tests {
         let entry_points = entry_points(&["public/backup/backup.php"]);
         assert_eq!(
             decide(&reference, &entry_points),
-            Some("$CFG->root . '/public/backup/moodle2/backup_plan_builder.class.php'".to_string())
+            Some("\\core\\component::get_path('/public/backup/moodle2/backup_plan_builder.class.php')".to_string())
         );
     }
 
@@ -627,11 +746,11 @@ mod tests {
     /// A target file that happens to itself be a page, CLI script or bootstrap file has exactly one
     /// real copy once split up — the one a (not yet written) Composer plugin places back at its
     /// original path — regardless of which component the reference resolves it into for packaging
-    /// purposes. So it's addressed the same way a `root`-owned target is, `$CFG->root`, never
+    /// purposes. So it's addressed the same way a `root`-owned target is, via `get_path()`, never
     /// `component_path()`, even though this is an ordinary different-component reference in every
     /// other respect.
     #[test]
-    fn entry_point_target_in_a_different_component_rewrites_to_cfg_root_not_component_path() {
+    fn entry_point_target_in_a_different_component_rewrites_to_get_path_not_component_path() {
         let reference = reference(
             "public/admin/tool/phpunit/cli/util.php",
             "public/lib/setup.php",
@@ -641,7 +760,7 @@ mod tests {
         );
         assert_eq!(
             decide(&reference, &entry_points(&["public/lib/setup.php"])),
-            Some("$CFG->root . '/public/lib/setup.php'".to_string())
+            Some("\\core\\component::get_path('/public/lib/setup.php')".to_string())
         );
     }
 
@@ -649,10 +768,10 @@ mod tests {
     /// reference between them stays `__DIR__`-relative), a source and an entry-point target being
     /// nominally in the *same* real component does not mean they end up in the same place — the
     /// source's file still gets packaged, but the target's real copy is pinned to the project root
-    /// by the plugin. `$CFG->root` is still correct here even though the source is not itself an
-    /// entry point.
+    /// by the plugin. A `get_path()` call is still correct here even though the source is not itself
+    /// an entry point.
     #[test]
-    fn entry_point_target_in_the_same_component_rewrites_to_cfg_root_not_dir_relative() {
+    fn entry_point_target_in_the_same_component_rewrites_to_get_path_not_dir_relative() {
         let reference = reference(
             "public/lib/classes/deep/nested/path/x.php",
             "public/lib/setup.php",
@@ -662,13 +781,13 @@ mod tests {
         );
         assert_eq!(
             decide(&reference, &entry_points(&["public/lib/setup.php"])),
-            Some("$CFG->root . '/public/lib/setup.php'".to_string())
+            Some("\\core\\component::get_path('/public/lib/setup.php')".to_string())
         );
     }
 
     /// The entry-point-target rule takes priority regardless of whether the source is *also* an
-    /// entry point — both routes were already going to land on `$CFG->root`, but this confirms they
-    /// don't interact to produce anything unexpected (e.g. a doubled path).
+    /// entry point — both routes were already going to land on a `get_path()` call, but this
+    /// confirms they don't interact to produce anything unexpected (e.g. a doubled path).
     #[test]
     fn entry_point_target_rule_applies_even_when_source_is_also_an_entry_point() {
         let reference = reference(
@@ -684,7 +803,7 @@ mod tests {
         ]);
         assert_eq!(
             decide(&reference, &entry_points),
-            Some("$CFG->root . '/public/lib/phpunit/bootstrap.php'".to_string())
+            Some("\\core\\component::get_path('/public/lib/phpunit/bootstrap.php')".to_string())
         );
     }
 
@@ -703,7 +822,46 @@ mod tests {
         );
         assert_eq!(
             decide(&reference, &entry_points(&["public/r.php"])),
-            Some("$CFG->root . '/public/r.php'".to_string())
+            Some("\\core\\component::get_path('/public/r.php')".to_string())
+        );
+    }
+
+    /// A bare-literal reference sitting in a bootstrap file's own pre-component code rewrites to a
+    /// `__DIR__`-relative expression — the same mechanism `Config` uses, and for the same reason:
+    /// `component_path()`/`get_path()` don't exist yet at this point in the bootstrap sequence.
+    #[test]
+    fn pre_component_literal_rewrites_to_a_dir_relative_path() {
+        let reference = reference(
+            "public/lib/setup.php",
+            "public/lib/setuplib.php",
+            PathKind::RequireLiteral,
+            PathCategory::PreComponentLiteral,
+            None,
+        );
+        assert_eq!(
+            decide(&reference, &entry_points(&[])),
+            Some("__DIR__ . '/setuplib.php'".to_string())
+        );
+    }
+
+    /// Unlike `StaticSameComponent`/`StaticDifferentComponent`, a pre-component literal keeps its
+    /// `__DIR__`-relative replacement even when its target is itself a bootstrap file — the rule
+    /// that would otherwise force a `get_path()` call for such a target must never reach this
+    /// category, since `get_path()` is exactly as unavailable this early as `component_path()` is.
+    #[test]
+    fn pre_component_literal_targeting_a_bootstrap_file_is_not_forced_to_get_path() {
+        let reference = reference(
+            "public/lib/setup.php",
+            "public/lib/classes/component.php",
+            PathKind::RequireLiteral,
+            PathCategory::PreComponentLiteral,
+            Some(("core", "/classes/component.php")),
+        );
+        let entry_points =
+            entry_points(&["public/lib/setup.php", "public/lib/classes/component.php"]);
+        assert_eq!(
+            decide(&reference, &entry_points),
+            Some("__DIR__ . '/classes/component.php'".to_string())
         );
     }
 
@@ -743,7 +901,7 @@ mod tests {
 
     /// Unlike every other rule in `decide`, a config.php reference gets the same replacement
     /// whether or not the referencing file is an entry point — there is no `component_path()`/
-    /// `$CFG->root` alternative being given up either way, so entry-point status has nothing to
+    /// `get_path()` alternative being given up either way, so entry-point status has nothing to
     /// change here.
     #[test]
     fn config_reference_rewrite_is_unaffected_by_entry_point_status() {
@@ -893,8 +1051,11 @@ mod tests {
     /// sequence it lives in can't be split out under this project's approach at all (there's no
     /// `core\component` oracle available yet to split it *through*), so whatever the reference is
     /// written as today is already permanent, unlike the categories this tool hasn't implemented a
-    /// rule for yet. Unlike `Config`, this holds even for a bare literal or a `$CFG->dirroot`/`root`
-    /// reference, not just an already-`__DIR__`-relative one.
+    /// rule for yet. This holds for an already-`__DIR__`-relative reference or a `$CFG->dirroot`/
+    /// `root` one; a bare literal in the same position is never actually categorised `PreComponent`
+    /// in the first place (see [`PathCategory::PreComponentLiteral`] and its own `still_needs_rewrite`
+    /// tests below) — `categorise` never produces this combination — so there's no bare-literal case
+    /// to cover here the way there is for `Config`.
     #[test]
     fn pre_component_reference_already_dir_relative_does_not_still_need_rewriting() {
         let reference = reference(
@@ -907,15 +1068,51 @@ mod tests {
         assert!(!still_needs_rewrite(&reference, &entry_points(&[])));
     }
 
+    /// Unlike `PreComponent`, a bare literal in the same position is never left alone — see
+    /// [`PathCategory::PreComponentLiteral`]'s own doc comment for why.
     #[test]
-    fn pre_component_reference_on_a_bare_literal_does_not_still_need_rewriting() {
+    fn pre_component_literal_reference_still_needs_rewriting() {
         let reference = reference(
             "public/lib/setup.php",
             "public/lib/component.php",
             PathKind::RequireLiteral,
-            PathCategory::PreComponent,
+            PathCategory::PreComponentLiteral,
             None,
         );
+        assert!(still_needs_rewrite(&reference, &entry_points(&[])));
+    }
+
+    /// Once a pre-component literal has already been rewritten to match what `decide` produces,
+    /// there's nothing left outstanding — the same "does the current text already match" check
+    /// every other rewritten-in-place category gets.
+    #[test]
+    fn pre_component_literal_reference_already_matching_does_not_still_need_rewriting() {
+        let mut reference = reference(
+            "public/lib/setup.php",
+            "public/lib/component.php",
+            PathKind::RequireLiteral,
+            PathCategory::PreComponentLiteral,
+            None,
+        );
+        reference.result.code = "__DIR__ . '/component.php'".to_string();
+        assert!(!still_needs_rewrite(&reference, &entry_points(&[])));
+    }
+
+    /// A traced-variable reference (`require($var)`, resolved by tracing back to an earlier
+    /// same-file assignment — see [`PathKind::TracedVariable`]) is never rewritten, regardless of
+    /// what category it otherwise resolved to: the source text at the require site is the
+    /// variable, not a path, so there is nothing there `decide` could safely replace with the
+    /// resolved target.
+    #[test]
+    fn traced_variable_reference_is_never_rewritten() {
+        let reference = reference(
+            "public/config.php",
+            "config.php",
+            PathKind::TracedVariable,
+            PathCategory::Config,
+            None,
+        );
+        assert_eq!(decide(&reference, &entry_points(&[])), None);
         assert!(!still_needs_rewrite(&reference, &entry_points(&[])));
     }
 
@@ -1035,5 +1232,84 @@ mod tests {
             "'HTML/QuickForm/checkbox.php'",
         );
         assert!(!still_needs_rewrite(&reference, &entry_points(&[])));
+    }
+
+    /// Reproduces the real bug this covers: `public/lib/classes/string_manager_standard.php`
+    /// originally reads `"$CFG->dirroot/lang/en/$file.php"`, a `root`-owned target with a variable
+    /// glued onto a literal filename. The path finder represents that target as
+    /// `public/lang/en/{$file}.php`, and prior to this fix the root-owned rewrite (via the old
+    /// `quote_php_string` call, before `path_text_expression` existed) single-quoted that whole
+    /// string as if the `{$file}` marker were four ordinary characters, producing a call whose
+    /// argument was the literal `'/public/lang/en/{$file}.php'` — valid PHP that always looked for a
+    /// file literally named `{$file}.php` and never found one.
+    #[test]
+    fn root_owned_target_with_a_variable_glued_to_a_literal_filename_keeps_the_variable_live() {
+        let reference = reference(
+            "public/lib/classes/string_manager_standard.php",
+            "public/lang/en/{$file}.php",
+            PathKind::Dirroot,
+            PathCategory::StaticDifferentComponent,
+            Some((ROOT_COMPONENT, "/public/lang/en/{$file}.php")),
+        );
+        assert_eq!(
+            decide(&reference, &entry_points(&[])),
+            Some("\\core\\component::get_path('/public/lang/en/' . $file . '.php')".to_string())
+        );
+    }
+
+    #[test]
+    fn path_text_expression_with_no_marker_matches_a_plain_quoted_literal() {
+        assert_eq!(
+            path_text_expression("public/mod/assign/lib.php"),
+            "'public/mod/assign/lib.php'"
+        );
+    }
+
+    #[test]
+    fn path_text_expression_of_an_empty_value_is_an_empty_string_literal() {
+        assert_eq!(path_text_expression(""), "''");
+    }
+
+    #[test]
+    fn path_text_expression_splices_a_marker_fused_to_a_literal_suffix() {
+        assert_eq!(
+            path_text_expression("public/lang/en/{$file}.php"),
+            "'public/lang/en/' . $file . '.php'"
+        );
+    }
+
+    /// A marker filling a whole trailing segment on its own — e.g.
+    /// `public/install/lang/{$options['lang']}` — leaves no trailing literal segment at all, so the
+    /// expression should end on the bare marker rather than an empty `. ''`.
+    #[test]
+    fn path_text_expression_with_a_marker_as_the_final_whole_segment_has_no_trailing_literal() {
+        assert_eq!(
+            path_text_expression("public/install/lang/{$options['lang']}"),
+            "'public/install/lang/' . $options['lang']"
+        );
+    }
+
+    /// A value that is nothing but a single marker collapses to the bare expression, with no `.`
+    /// operator and no empty literal on either side.
+    #[test]
+    fn path_text_expression_of_a_lone_marker_is_the_bare_expression() {
+        assert_eq!(path_text_expression("{$name}"), "$name");
+    }
+
+    /// Two markers back to back (e.g. `backup/converter/{$name}/lib.php` with a further variable
+    /// segment) must not produce an empty literal between them.
+    #[test]
+    fn path_text_expression_with_adjacent_markers_has_no_empty_literal_between_them() {
+        assert_eq!(path_text_expression("{$a}{$b}"), "$a . $b");
+    }
+
+    /// A marker whose own expression contains braces (e.g. a nested interpolation) must be split on
+    /// matching depth, not on the first `}` encountered.
+    #[test]
+    fn path_text_expression_marker_with_nested_braces_is_not_cut_short() {
+        assert_eq!(
+            path_text_expression("public/theme/{$this->page->theme->{$prop}}/style.php"),
+            "'public/theme/' . $this->page->theme->{$prop} . '/style.php'"
+        );
     }
 }

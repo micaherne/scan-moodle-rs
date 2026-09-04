@@ -31,6 +31,15 @@ pub struct PathResult {
     /// ready to pass to core\component::from_mono_path(). Empty for paths not rooted at
     /// $CFG->dirroot.
     pub mono_path_expr: String,
+    /// The last line still inside this reference's own innermost enclosing `if`/`elseif`/`else`
+    /// body, if it sits inside one — `None` if it sits at its file's own top level. Only
+    /// `if`/`elseif`/`else` bodies are tracked (not loops, `switch`, `try`, or function/method
+    /// bodies — see [`crate::path_finder::find_paths`]'s walker for why): this project's own boundary
+    /// computation ([`crate::moodle::entrypoints`]) is the only consumer, and needs to know that a
+    /// require/include reachable only on one conditional branch cannot be assumed to have run for
+    /// code outside that branch, the same way a require unconditionally at the top of the file
+    /// can be.
+    pub scope_end_line: Option<u32>,
 }
 
 /// The kind of expression that anchors a [`PathResult`].
@@ -49,6 +58,14 @@ pub enum PathKind {
     /// A bare string literal used as the sole value of a require/include construct — no
     /// concatenation or other wrapping expression — and so treated as definitely a path.
     RequireLiteral,
+    /// A bare variable used as the sole value of a require/include construct, resolved by tracing
+    /// back to the nearest earlier same-file assignment to that same variable whose own
+    /// right-hand side is itself one of the other recognised shapes above — one hop only, no
+    /// further tracing through whatever that assignment's own value came from. Never eligible for
+    /// this project's rewrite step (see `crate::rewrite::decide::is_eligible`): the source text at
+    /// the require site is the variable, not the path, so there is nothing there that could be
+    /// safely replaced with a `component_path()`/`__DIR__`-relative expression.
+    TracedVariable,
 }
 
 impl fmt::Display for PathKind {
@@ -60,6 +77,7 @@ impl fmt::Display for PathKind {
             Self::Dir => "dir",
             Self::File => "file",
             Self::RequireLiteral => "require-literal",
+            Self::TracedVariable => "traced-variable",
         })
     }
 }

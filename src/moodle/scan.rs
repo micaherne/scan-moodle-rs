@@ -3,7 +3,7 @@
 //! rewrite command's scans, so each reads the codebase exactly once, and categorises the result
 //! the same way `find-paths --categorise` does.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -120,13 +120,7 @@ pub fn categorise_all(scan: &Scan, dirroot: &str) -> Vec<CategorisedReference> {
     let resolver = ComponentResolver::new(&scan.discovered);
     let config_locations = entrypoints::config_locations(&scan.notation);
     let component_locations = entrypoints::component_locations(&scan.notation);
-    let boundary_lines: HashMap<String, u32> =
-        entrypoints::classify(&scan.files, &scan.notation, true)
-            .into_iter()
-            .filter_map(|classification| {
-                classification.line.map(|line| (classification.file, line))
-            })
-            .collect();
+    let pre_component_extents = entrypoints::pre_component_extents(&scan.files, &scan.notation);
     let plugin_type_roots: HashSet<String> =
         scan.discovered.plugin_types.values().cloned().collect();
     // Fixed for the whole scan (see `ScanContext`), so built once here rather than per file —
@@ -147,7 +141,7 @@ pub fn categorise_all(scan: &Scan, dirroot: &str) -> Vec<CategorisedReference> {
             // value outside this closure invocation to borrow it from instead.
             let file_context = categorise::FileContext {
                 is_component_file: component_locations.contains(file),
-                file_boundary_line: boundary_lines.get(file).copied(),
+                pre_component_extent: pre_component_extents.get(file).cloned(),
                 source_component: resolver
                     .resolve(file)
                     .map(|resolution| resolution.component),

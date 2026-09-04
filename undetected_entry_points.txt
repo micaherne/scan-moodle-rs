@@ -1,0 +1,13 @@
+# Entry points the require/include graph can never discover on its own — see entrypoints.rs's own
+# module doc comment ("Files the graph can never reach") for why this list exists and how it's used.
+#
+# One dirroot-relative path per line (no leading slash, no 'public/' prefix). Blank lines and lines
+# starting with '#' are ignored.
+#
+# Every file listed here is assumed to never have `core\component`/$CFG available anywhere in its
+# own code (see PreComponentExtent::WholeFile in entrypoints.rs) — true for init.php below, but not
+# guaranteed for whatever gets added next. Check that assumption still holds before adding a new
+# entry; nothing enforces it automatically.
+
+# Shells out to util.php in the same directory instead of requiring it.
+admin/tool/phpunit/cli/init.php
