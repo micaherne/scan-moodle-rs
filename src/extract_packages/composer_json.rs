@@ -12,7 +12,7 @@ use crate::moodle::resolver::{ComponentResolver, ROOT_COMPONENT};
 
 use super::copy::component_dir_name;
 
-const VENDOR: &str = "moodlehq";
+const VENDOR: &str = "moodle";
 /// The SPDX identifier Moodle's own upstream `composer.json` uses.
 const LICENSE: &str = "GPL-3.0-or-later";
 
@@ -137,7 +137,7 @@ pub(super) fn group_by_component(
     by_component
 }
 
-/// `moodlehq/moodle-<component>` — the package name every component's own `composer.json` (real
+/// `moodle/moodle-<component>` — the package name every component's own `composer.json` (real
 /// or `root`) is written with. Shared with [`write_metapackage`] so the dependencies it lists can
 /// never drift out of sync with what each package actually calls itself.
 fn package_name(component: &str) -> String {
@@ -372,7 +372,7 @@ mod tests {
 
         let content = fs::read_to_string(dir.join("composer.json")).unwrap();
         let value: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert_eq!(value["name"], "moodlehq/moodle-mod_quiz");
+        assert_eq!(value["name"], "moodle/moodle-mod_quiz");
         assert_eq!(value["type"], "moodle-component");
         assert_eq!(value["license"], "GPL-3.0-or-later");
         assert_eq!(value["autoload"]["psr-4"]["mod_quiz\\"], "classes/");
@@ -497,7 +497,7 @@ mod tests {
 
         let content = fs::read_to_string(dir.join("composer.json")).unwrap();
         let value: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert_eq!(value["name"], "moodlehq/moodle-root");
+        assert_eq!(value["name"], "moodle/moodle-root");
         assert_eq!(value["type"], "moodle-root");
         assert_eq!(value["license"], "GPL-3.0-or-later");
         assert!(value.get("autoload").is_none());
@@ -540,7 +540,7 @@ mod tests {
 
         let content = fs::read_to_string(dir.join("composer.json")).unwrap();
         let value: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert_eq!(value["name"], "moodlehq/moodle-root");
+        assert_eq!(value["name"], "moodle/moodle-root");
         assert_eq!(value["type"], "moodle-root");
         assert_eq!(value["require"]["php"], ">=8.3.0");
         assert_eq!(value["require-dev"]["filp/whoops"], "^2.15");
@@ -574,12 +574,12 @@ mod tests {
 
         let content = fs::read_to_string(dir.join("composer.json")).unwrap();
         let value: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert_eq!(value["name"], "moodlehq/moodle-standard");
+        assert_eq!(value["name"], "moodle/moodle-standard");
         assert_eq!(value["type"], "metapackage");
         assert_eq!(value["license"], "GPL-3.0-or-later");
-        assert_eq!(value["require"]["moodlehq/moodle-mod_quiz"], "*");
-        assert_eq!(value["require"]["moodlehq/moodle-core"], "*");
-        assert_eq!(value["require"]["moodlehq/moodle-root"], "*");
+        assert_eq!(value["require"]["moodle/moodle-mod_quiz"], "*");
+        assert_eq!(value["require"]["moodle/moodle-core"], "*");
+        assert_eq!(value["require"]["moodle/moodle-root"], "*");
         assert!(value.get("autoload").is_none());
 
         fs::remove_dir_all(&dir).ok();
@@ -601,9 +601,9 @@ mod tests {
         assert_eq!(
             keys,
             vec![
-                "moodlehq/moodle-auth_manual",
-                "moodlehq/moodle-core",
-                "moodlehq/moodle-mod_quiz",
+                "moodle/moodle-auth_manual",
+                "moodle/moodle-core",
+                "moodle/moodle-mod_quiz",
             ]
         );
 
